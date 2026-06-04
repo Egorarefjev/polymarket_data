@@ -1,0 +1,35 @@
+{
+  "name": "polymarket-data-collector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write .",
+    "collector": "tsx src/cli/collector.ts",
+    "collector:sample": "tsx src/cli/collector.ts all --start-date 2026-05-01 --end-date 2026-05-02 --symbol BTCUSDT --price-fidelity-seconds 5"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "commander": "^14.0.2",
+    "p-limit": "^7.2.0",
+    "pino": "^10.1.0",
+    "parquetjs-lite": "^0.8.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/adm-zip": "^0.5.7",
+    "@types/node": "^24.10.1",
+    "eslint": "^9.39.1",
+    "prettier": "^3.7.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.0",
+    "vitest": "^4.0.14"
+  }
+}
