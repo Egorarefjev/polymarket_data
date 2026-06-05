@@ -12,7 +12,7 @@
     "lint": "eslint . --ext .ts",
     "format": "prettier --write .",
     "collector": "tsx src/cli/collector.ts",
-    "collector:sample": "tsx src/cli/collector.ts all --start-date 2026-05-01 --end-date 2026-05-02 --symbol BTCUSDT --price-fidelity-seconds 5"
+    "collector:sample": "tsx src/cli/collector.ts all --start-date 2026-05-01 --end-date 2026-05-02 --symbol BTCUSDT --price-fidelity-minutes 1 --primary-price-source chainlink --include-binance-secondary-signal true"
   },
   "dependencies": {
     "adm-zip": "^0.5.16",

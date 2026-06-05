@@ -12,13 +12,13 @@ export class PolymarketClobApiAdapter {
     tokenId: string;
     startTimestampMilliseconds: number;
     endTimestampMilliseconds: number;
-    fidelitySeconds: number;
+    fidelityMinutes: number;
   }): Promise<PriceHistoryPoint[]> {
     const url = new URL('/prices-history', this.baseUrl);
     url.searchParams.set('market', parameters.tokenId);
     url.searchParams.set('startTs', String(Math.floor(parameters.startTimestampMilliseconds / 1_000)));
     url.searchParams.set('endTs', String(Math.floor(parameters.endTimestampMilliseconds / 1_000)));
-    url.searchParams.set('fidelity', String(parameters.fidelitySeconds));
+    url.searchParams.set('fidelity', String(parameters.fidelityMinutes));
     const rawResponse = await this.httpClient.getJson<unknown>(url);
     const rawHistory = extractRawHistoryArray(rawResponse);
     return rawHistory.flatMap((rawPoint) => {
