@@ -1,5 +1,6 @@
 export type MarketOutcome = 'Up' | 'Down' | 'Yes' | 'No' | 'Unknown';
 export type MarketWinner = 'up' | 'down' | 'unknown' | null;
+export type ExternalPriceSourceName = 'chainlink' | 'binance' | string;
 
 export interface NormalizedMarket {
   marketSlug: string;
@@ -32,9 +33,23 @@ export interface PriceHistoryPoint {
   price: number;
 }
 
+export interface ExternalPricePoint {
+  timestampMilliseconds: number;
+  price: number;
+  sourceName: ExternalPriceSourceName;
+}
+
 export interface BinancePricePoint {
   timestampMilliseconds: number;
   btcPrice: number;
+}
+
+export interface PriceHistoryQualityMetrics {
+  pointsCount: number;
+  minimumTimestampMilliseconds: number | null;
+  maximumTimestampMilliseconds: number | null;
+  medianGapMilliseconds: number | null;
+  maximumGapMilliseconds: number | null;
 }
 
 export interface NormalizedPricePoint {
@@ -43,9 +58,15 @@ export interface NormalizedPricePoint {
   timestampMilliseconds: number;
   secondsLeft: number;
   targetPrice: number;
-  btcPrice: number;
-  distanceUsd: number;
-  distanceBasisPoints: number;
+  chainlinkPrice: number;
+  chainlinkTimestampMilliseconds: number;
+  chainlinkDistanceUsd: number;
+  chainlinkDistanceBasisPoints: number;
+  binancePrice: number | null;
+  binanceTimestampMilliseconds: number | null;
+  binanceDistanceUsd: number | null;
+  binanceDistanceBasisPoints: number | null;
+  binanceMinusChainlinkBasisPoints: number | null;
   upPrice: number | null;
   downPrice: number | null;
   winner: MarketWinner;
@@ -60,8 +81,11 @@ export interface MarketSummary {
   marketEndTimestampMilliseconds: number;
   targetPrice: number;
   winner: MarketWinner;
-  closeBtcPrice: number | null;
-  finalDistanceBasisPoints: number | null;
+  closeChainlinkPrice: number | null;
+  finalChainlinkDistanceBasisPoints: number | null;
+  closeBinancePrice: number | null;
+  finalBinanceDistanceBasisPoints: number | null;
+  finalBinanceMinusChainlinkBasisPoints: number | null;
   maximumUpPrice: number | null;
   maximumDownPrice: number | null;
   firstTimestampUpPriceGreaterThanOrEqual075: number | null;

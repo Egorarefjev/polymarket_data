@@ -1,6 +1,8 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { ParquetSchema, ParquetWriter } from 'parquetjs-lite';
+import parquetjsLite from 'parquetjs-lite';
+
+const { ParquetSchema, ParquetWriter } = parquetjsLite;
 
 export type ParquetColumnType = 'UTF8' | 'DOUBLE' | 'INT64' | 'BOOLEAN';
 export type ParquetSchemaDefinition = Record<string, { type: ParquetColumnType; optional?: boolean }>;

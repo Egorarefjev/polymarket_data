@@ -18,23 +18,108 @@ export class PolymarketGammaApiAdapter {
   ) {}
 
   public async discoverBitcoinUpDownFiveMinuteMarkets(startDate: string, endDate: string): Promise<Record<string, unknown>[]> {
+    const discovery = (await this.tryDiscoverWithKeysetPagination(startDate, endDate)) ?? (await this.discoverWithOffsetPagination(startDate, endDate));
+    if (!doesFetchedRangeCoverRequestedRange(discovery.earliestFetchedEndDate, discovery.latestFetchedEndDate, startDate, endDate)) {
+      // eslint-disable-next-line no-console
+      console.warn(JSON.stringify({
+        dataQualityFlag: 'gamma_discovery_fetched_range_does_not_cover_requested_range',
+        requestedStartDate: `${startDate}T00:00:00.000Z`,
+        requestedEndDate: `${endDate}T00:00:00.000Z`,
+        earliestFetchedEndDate: discovery.earliestFetchedEndDate,
+        latestFetchedEndDate: discovery.latestFetchedEndDate,
+      }));
+    }
+    // eslint-disable-next-line no-console
+    console.info(JSON.stringify({
+      pagesFetched: discovery.pagesFetched,
+      rawMarketsFetched: discovery.rawMarketsFetched,
+      matchingMarketsFound: discovery.markets.length,
+      earliestFetchedEndDate: discovery.earliestFetchedEndDate,
+      latestFetchedEndDate: discovery.latestFetchedEndDate,
+    }));
+    return discovery.markets;
+  }
+
+
+  private async tryDiscoverWithKeysetPagination(startDate: string, endDate: string): Promise<{ markets: Record<string, unknown>[]; pagesFetched: number; rawMarketsFetched: number; earliestFetchedEndDate: string | null; latestFetchedEndDate: string | null } | null> {
+    const allRawMarkets: Record<string, unknown>[] = [];
+    const limit = 500;
+    let afterCursor: string | null = null;
+    let pagesFetched = 0;
+    let rawMarketsFetched = 0;
+    let earliestFetchedEndTimestamp: number | null = null;
+    let latestFetchedEndTimestamp: number | null = null;
+    try {
+      while (true) {
+        const url = new URL('/markets/keyset', this.baseUrl);
+        url.searchParams.set('limit', String(limit));
+        if (afterCursor !== null) url.searchParams.set('after_cursor', afterCursor);
+        setGammaDateFilterSearchParams(url, startDate, endDate);
+        const rawPage = await this.httpClient.getJson<unknown>(url);
+        if (!isRecord(rawPage)) return null;
+        const rawMarkets = extractKeysetMarkets(rawPage);
+        if (rawMarkets === null) return null;
+        pagesFetched += 1;
+        rawMarketsFetched += rawMarkets.length;
+        for (const rawMarket of rawMarkets) {
+          const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']);
+          if (endTimestamp !== null) {
+            earliestFetchedEndTimestamp = earliestFetchedEndTimestamp === null ? endTimestamp : Math.min(earliestFetchedEndTimestamp, endTimestamp);
+            latestFetchedEndTimestamp = latestFetchedEndTimestamp === null ? endTimestamp : Math.max(latestFetchedEndTimestamp, endTimestamp);
+          }
+        }
+        allRawMarkets.push(...rawMarkets.filter(isBitcoinUpDownFiveMinuteMarket));
+        const nextCursor = typeof rawPage['next_cursor'] === 'string' ? rawPage['next_cursor'] : typeof rawPage['nextCursor'] === 'string' ? rawPage['nextCursor'] : null;
+        if (rawMarkets.length === 0 || rawMarkets.length < limit || nextCursor === null) break;
+        afterCursor = nextCursor;
+      }
+      return {
+        markets: allRawMarkets,
+        pagesFetched,
+        rawMarketsFetched,
+        earliestFetchedEndDate: earliestFetchedEndTimestamp === null ? null : new Date(earliestFetchedEndTimestamp).toISOString(),
+        latestFetchedEndDate: latestFetchedEndTimestamp === null ? null : new Date(latestFetchedEndTimestamp).toISOString(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async discoverWithOffsetPagination(startDate: string, endDate: string): Promise<{ markets: Record<string, unknown>[]; pagesFetched: number; rawMarketsFetched: number; earliestFetchedEndDate: string | null; latestFetchedEndDate: string | null }> {
     const allRawMarkets: Record<string, unknown>[] = [];
     let offset = 0;
     const limit = 500;
+    let pagesFetched = 0;
+    let rawMarketsFetched = 0;
+    let earliestFetchedEndTimestamp: number | null = null;
+    let latestFetchedEndTimestamp: number | null = null;
     while (true) {
       const url = new URL('/markets', this.baseUrl);
       url.searchParams.set('limit', String(limit));
       url.searchParams.set('offset', String(offset));
-      url.searchParams.set('closed', 'true');
+      setGammaDateFilterSearchParams(url, startDate, endDate);
       const rawPage = await this.httpClient.getJson<unknown>(url);
       const rawMarkets = Array.isArray(rawPage) ? rawPage.filter(isRecord) : [];
-      if (rawMarkets.length === 0) break;
-      const matchingMarkets = rawMarkets.filter((rawMarket) => isBitcoinUpDownFiveMinuteMarket(rawMarket, startDate, endDate));
-      allRawMarkets.push(...matchingMarkets);
-      if (rawMarkets.length < limit || offset >= 10_000) break;
+      pagesFetched += 1;
+      rawMarketsFetched += rawMarkets.length;
+      for (const rawMarket of rawMarkets) {
+        const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']);
+        if (endTimestamp !== null) {
+          earliestFetchedEndTimestamp = earliestFetchedEndTimestamp === null ? endTimestamp : Math.min(earliestFetchedEndTimestamp, endTimestamp);
+          latestFetchedEndTimestamp = latestFetchedEndTimestamp === null ? endTimestamp : Math.max(latestFetchedEndTimestamp, endTimestamp);
+        }
+      }
+      allRawMarkets.push(...rawMarkets.filter(isBitcoinUpDownFiveMinuteMarket));
+      if (rawMarkets.length === 0 || rawMarkets.length < limit) break;
       offset += limit;
     }
-    return allRawMarkets;
+    return {
+      markets: allRawMarkets,
+      pagesFetched,
+      rawMarketsFetched,
+      earliestFetchedEndDate: earliestFetchedEndTimestamp === null ? null : new Date(earliestFetchedEndTimestamp).toISOString(),
+      latestFetchedEndDate: latestFetchedEndTimestamp === null ? null : new Date(latestFetchedEndTimestamp).toISOString(),
+    };
   }
 
   public parseMarkets(rawMarkets: Record<string, unknown>[], rawMarketFilePath: string): GammaDiscoveryResult {
@@ -115,22 +200,36 @@ function normalizeGammaMarket(rawMarket: Record<string, unknown>): NormalizedMar
   };
 }
 
-function isBitcoinUpDownFiveMinuteMarket(rawMarket: Record<string, unknown>, startDate: string, endDate: string): boolean {
+function isBitcoinUpDownFiveMinuteMarket(rawMarket: Record<string, unknown>): boolean {
   const searchableText = [rawMarket['slug'], rawMarket['question'], rawMarket['title'], rawMarket['description']]
     .filter((value): value is string => typeof value === 'string')
     .join(' ')
     .toLowerCase();
-  const marketEndTimestampMilliseconds = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']);
-  const startTimestampMilliseconds = Date.parse(`${startDate}T00:00:00.000Z`);
-  const endTimestampMilliseconds = Date.parse(`${endDate}T00:00:00.000Z`);
   return (
     /\b(bitcoin|btc)\b/u.test(searchableText) &&
     /(up|down)/u.test(searchableText) &&
-    /(5m|5-min|5 min|5 minute|five minute)/u.test(searchableText) &&
-    marketEndTimestampMilliseconds !== null &&
-    marketEndTimestampMilliseconds >= startTimestampMilliseconds &&
-    marketEndTimestampMilliseconds < endTimestampMilliseconds
+    /(5m|5-min|5 min|5 minute|five minute)/u.test(searchableText)
   );
+}
+
+function setGammaDateFilterSearchParams(url: URL, startDate: string, endDate: string): void {
+  url.searchParams.set('closed', 'true');
+  url.searchParams.set('order', 'endDate');
+  url.searchParams.set('ascending', 'true');
+  url.searchParams.set('end_date_min', `${startDate}T00:00:00.000Z`);
+  url.searchParams.set('end_date_max', `${endDate}T00:00:00.000Z`);
+}
+
+function doesFetchedRangeCoverRequestedRange(earliestFetchedEndDate: string | null, latestFetchedEndDate: string | null, startDate: string, endDate: string): boolean {
+  if (earliestFetchedEndDate === null || latestFetchedEndDate === null) return false;
+  const requestedStartTimestamp = Date.parse(`${startDate}T00:00:00.000Z`);
+  const requestedEndTimestamp = Date.parse(`${endDate}T00:00:00.000Z`);
+  return Date.parse(earliestFetchedEndDate) <= requestedStartTimestamp && Date.parse(latestFetchedEndDate) >= requestedEndTimestamp - 1;
+}
+
+function extractKeysetMarkets(rawPage: Record<string, unknown>): Record<string, unknown>[] | null {
+  const rawMarkets = rawPage['markets'] ?? rawPage['data'];
+  return Array.isArray(rawMarkets) ? rawMarkets.filter(isRecord) : null;
 }
 
 function extractClobTokenIds(rawMarket: Record<string, unknown>): string[] {
