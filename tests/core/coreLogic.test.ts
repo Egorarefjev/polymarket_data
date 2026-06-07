@@ -665,20 +665,25 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
     }
   });
 
-
-
-  it('writes no debug JSON by default but still writes market summary parquet', async () => {
-    const directoryPath = await mkdtemp(join(tmpdir(), 'pm-debug-json-off-'));
+  it('removes stale debug JSON when disabled and still writes market summary parquet', async () => {
+    const directoryPath = await mkdtemp(join(tmpdir(), 'pm-debug-json-cleanup-'));
     try {
       const chainlinkPath = join(directoryPath, 'chainlink.jsonl');
       await writeFile(chainlinkPath, '{"timestampMilliseconds":1,"price":100100}\n', 'utf8');
-      const { useCases, fileStorage, parquetWrites } = await makeUseCases(directoryPath, chainlinkPath);
-      const seededOptions = { ...options, chainlinkInputFile: chainlinkPath, writeDebugJson: false };
-      await seedMarket(fileStorage, seededOptions);
-      await useCases.buildDataset(seededOptions);
-      expect(await fileStorage.exists(processedPricePointsDebugRelativeFilePath(seededOptions))).toBe(false);
-      expect(await fileStorage.exists(processedStrategyTrainingRowsDebugRelativeFilePath(seededOptions))).toBe(false);
-      expect(parquetWrites.some((write) => write.filePath === fileStorage.resolve(processedMarketSummaryRelativeFilePath(seededOptions)) && write.rowCount === 1)).toBe(true);
+      const { useCases, fileStorage, parquetWrites, infoEntries } = await makeUseCases(directoryPath, chainlinkPath);
+      const debugOptions = { ...options, chainlinkInputFile: chainlinkPath, writeDebugJson: true };
+      await seedMarket(fileStorage, debugOptions);
+      await useCases.buildDataset(debugOptions);
+      expect(await fileStorage.exists(processedPricePointsDebugRelativeFilePath(debugOptions))).toBe(true);
+      expect(await fileStorage.exists(processedStrategyTrainingRowsDebugRelativeFilePath(debugOptions))).toBe(true);
+
+      const noDebugOptions = { ...debugOptions, writeDebugJson: false };
+      await useCases.buildDataset(noDebugOptions);
+      expect(await fileStorage.exists(processedPricePointsDebugRelativeFilePath(noDebugOptions))).toBe(false);
+      expect(await fileStorage.exists(processedStrategyTrainingRowsDebugRelativeFilePath(noDebugOptions))).toBe(false);
+      expect(parquetWrites.some((write) => write.filePath === fileStorage.resolve(processedMarketSummaryRelativeFilePath(noDebugOptions)) && write.rowCount === 1)).toBe(true);
+      const cleanupLog = infoEntries.find((entry) => entry.message === 'Stale debug JSON cleanup completed');
+      expect(cleanupLog?.payload['deletedDebugJsonFiles']).toBe(2);
     } finally {
       await rm(directoryPath, { recursive: true, force: true });
     }
@@ -695,6 +700,76 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
       await useCases.buildDataset(seededOptions);
       expect(await fileStorage.exists(processedPricePointsDebugRelativeFilePath(seededOptions))).toBe(true);
       expect(await fileStorage.exists(processedStrategyTrainingRowsDebugRelativeFilePath(seededOptions))).toBe(true);
+    } finally {
+      await rm(directoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it('standalone summarize rejects when debug JSON mode is disabled even if stale debug JSON exists', async () => {
+    const directoryPath = await mkdtemp(join(tmpdir(), 'pm-summarize-debug-off-'));
+    try {
+      const chainlinkPath = join(directoryPath, 'chainlink.jsonl');
+      await writeFile(chainlinkPath, '{"timestampMilliseconds":1,"price":100100}\n', 'utf8');
+      const { useCases, fileStorage, parquetWrites } = await makeUseCases(directoryPath, chainlinkPath);
+      const debugOptions = { ...options, chainlinkInputFile: chainlinkPath, writeDebugJson: true };
+      await seedMarket(fileStorage, debugOptions);
+      await useCases.buildDataset(debugOptions);
+      parquetWrites.length = 0;
+      await expect(useCases.summarizeMarkets({ ...debugOptions, writeDebugJson: false })).rejects.toThrow('Standalone summarize reads debug JSON and is only allowed with --write-debug-json true');
+      expect(parquetWrites.some((write) => write.filePath === fileStorage.resolve(processedMarketSummaryRelativeFilePath(debugOptions)))).toBe(false);
+    } finally {
+      await rm(directoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it('standalone summarize rejects clearly when debug JSON mode is enabled but debug JSON is missing', async () => {
+    const directoryPath = await mkdtemp(join(tmpdir(), 'pm-summarize-missing-debug-'));
+    try {
+      const chainlinkPath = join(directoryPath, 'chainlink.jsonl');
+      await writeFile(chainlinkPath, '{"timestampMilliseconds":1,"price":100100}\n', 'utf8');
+      const { useCases, fileStorage } = await makeUseCases(directoryPath, chainlinkPath);
+      const seededOptions = { ...options, chainlinkInputFile: chainlinkPath, writeDebugJson: true };
+      await seedMarket(fileStorage, seededOptions);
+      await expect(useCases.summarizeMarkets(seededOptions)).rejects.toThrow(`Standalone summarize requires debug JSON, but ${processedPricePointsDebugRelativeFilePath(seededOptions)} does not exist`);
+    } finally {
+      await rm(directoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it('standalone summarize writes market summary parquet when debug JSON mode is enabled and debug JSON exists', async () => {
+    const directoryPath = await mkdtemp(join(tmpdir(), 'pm-summarize-debug-on-'));
+    try {
+      const chainlinkPath = join(directoryPath, 'chainlink.jsonl');
+      await writeFile(chainlinkPath, '{"timestampMilliseconds":1,"price":100100}\n', 'utf8');
+      const { useCases, fileStorage, parquetWrites } = await makeUseCases(directoryPath, chainlinkPath);
+      const seededOptions = { ...options, chainlinkInputFile: chainlinkPath, writeDebugJson: true };
+      await seedMarket(fileStorage, seededOptions);
+      await useCases.buildDataset(seededOptions);
+      parquetWrites.length = 0;
+      await useCases.summarizeMarkets(seededOptions);
+      expect(parquetWrites.some((write) => write.filePath === fileStorage.resolve(processedMarketSummaryRelativeFilePath(seededOptions)) && write.rowCount === 1)).toBe(true);
+    } finally {
+      await rm(directoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it('all pipeline with debug JSON disabled does not leave mirrors and still writes market summary parquet', async () => {
+    const directoryPath = await mkdtemp(join(tmpdir(), 'pm-all-debug-off-'));
+    try {
+      const chainlinkPath = join(directoryPath, 'chainlink.jsonl');
+      await writeFile(chainlinkPath, '{"timestampMilliseconds":1,"price":100100}\n', 'utf8');
+      const { useCases, fileStorage, parquetWrites } = await makeUseCases(directoryPath, chainlinkPath);
+      const seededOptions = { ...options, chainlinkInputFile: chainlinkPath, writeDebugJson: false };
+      await seedMarket(fileStorage, seededOptions);
+      await fileStorage.writeJson(processedPricePointsDebugRelativeFilePath(seededOptions), [{ stale: true }], true);
+      await fileStorage.writeJson(processedStrategyTrainingRowsDebugRelativeFilePath(seededOptions), [{ stale: true }], true);
+      vi.spyOn(useCases, 'discoverMarkets').mockResolvedValue(undefined);
+      vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
+      vi.spyOn(useCases, 'downloadPolymarketTrades').mockResolvedValue(undefined);
+      await useCases.runFullPipeline(seededOptions);
+      expect(await fileStorage.exists(processedPricePointsDebugRelativeFilePath(seededOptions))).toBe(false);
+      expect(await fileStorage.exists(processedStrategyTrainingRowsDebugRelativeFilePath(seededOptions))).toBe(false);
+      expect(parquetWrites.some((write) => write.filePath === fileStorage.resolve(processedMarketSummaryRelativeFilePath(seededOptions)) && write.rowCount === 1)).toBe(true);
     } finally {
       await rm(directoryPath, { recursive: true, force: true });
     }

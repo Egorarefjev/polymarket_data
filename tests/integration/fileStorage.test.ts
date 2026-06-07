@@ -19,4 +19,28 @@ describe('FileStorage', () => {
       await rm(temporaryDirectoryPath, { recursive: true, force: true });
     }
   });
+
+  it('deleteIfExists returns false and does not throw when file is absent', async () => {
+    const temporaryDirectoryPath = await mkdtemp(join(tmpdir(), 'polymarket-storage-'));
+    try {
+      const fileStorage = new FileStorage(temporaryDirectoryPath);
+      await expect(fileStorage.deleteIfExists('processed/missing.debug.json')).resolves.toBe(false);
+      await expect(fileStorage.deleteIfExists('processed/missing.debug.json')).resolves.toBe(false);
+    } finally {
+      await rm(temporaryDirectoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it('deleteIfExists deletes an existing file and returns true', async () => {
+    const temporaryDirectoryPath = await mkdtemp(join(tmpdir(), 'polymarket-storage-'));
+    try {
+      const fileStorage = new FileStorage(temporaryDirectoryPath);
+      await fileStorage.writeJson('processed/existing.debug.json', { stale: true }, true);
+      expect(await fileStorage.deleteIfExists('processed/existing.debug.json')).toBe(true);
+      expect(await fileStorage.exists('processed/existing.debug.json')).toBe(false);
+      expect(await fileStorage.deleteIfExists('processed/existing.debug.json')).toBe(false);
+    } finally {
+      await rm(temporaryDirectoryPath, { recursive: true, force: true });
+    }
+  });
 });
