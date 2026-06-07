@@ -5,14 +5,14 @@ const optionalInt64 = { type: 'INT64', optional: true } as const;
 const optionalUtf8 = { type: 'UTF8', optional: true } as const;
 
 export const marketsParquetSchema: ParquetSchemaDefinition = {
-  market_slug: { type: 'UTF8' }, condition_id: optionalUtf8, question: { type: 'UTF8' },
+  market_slug: { type: 'UTF8' }, condition_id: optionalUtf8, question: { type: 'UTF8' }, market_duration: { type: 'UTF8' },
   market_start_timestamp_milliseconds: { type: 'INT64' }, market_end_timestamp_milliseconds: { type: 'INT64' },
   up_token_id: optionalUtf8, down_token_id: optionalUtf8, target_price: optionalDouble,
   winner: optionalUtf8, is_resolved: { type: 'BOOLEAN' }, is_closed: { type: 'BOOLEAN' }, raw_outcomes: { type: 'UTF8' }, raw_outcome_prices: { type: 'UTF8' }, data_quality_flags: { type: 'UTF8' },
 };
 
 export const pricePointsParquetSchema: ParquetSchemaDefinition = {
-  market_slug: { type: 'UTF8' }, condition_id: optionalUtf8, timestamp_milliseconds: { type: 'INT64' }, seconds_left: { type: 'INT64' }, target_price: { type: 'DOUBLE' },
+  market_slug: { type: 'UTF8' }, condition_id: optionalUtf8, market_duration: { type: 'UTF8' }, timestamp_milliseconds: { type: 'INT64' }, seconds_left: { type: 'INT64' }, target_price: { type: 'DOUBLE' },
   up_price: optionalDouble, down_price: optionalDouble,
   primary_price_source_name: { type: 'UTF8' }, primary_price: { type: 'DOUBLE' }, primary_timestamp_milliseconds: { type: 'INT64' }, primary_distance_usd: { type: 'DOUBLE' }, primary_distance_basis_points: { type: 'DOUBLE' },
   chainlink_price: optionalDouble, chainlink_timestamp_milliseconds: optionalInt64, chainlink_distance_usd: optionalDouble, chainlink_distance_basis_points: optionalDouble,
@@ -26,7 +26,7 @@ export const pricePointsParquetSchema: ParquetSchemaDefinition = {
 };
 
 export const marketSummaryParquetSchema: ParquetSchemaDefinition = {
-  market_slug: { type: 'UTF8' }, condition_id: optionalUtf8, market_start_timestamp_milliseconds: { type: 'INT64' }, market_end_timestamp_milliseconds: { type: 'INT64' }, target_price: { type: 'DOUBLE' }, winner: optionalUtf8,
+  market_slug: { type: 'UTF8' }, condition_id: optionalUtf8, market_duration: { type: 'UTF8' }, market_start_timestamp_milliseconds: { type: 'INT64' }, market_end_timestamp_milliseconds: { type: 'INT64' }, target_price: { type: 'DOUBLE' }, winner: optionalUtf8,
   primary_price_source_name: optionalUtf8, close_primary_price: optionalDouble, final_primary_distance_basis_points: optionalDouble,
   close_chainlink_price: optionalDouble, final_chainlink_distance_basis_points: optionalDouble, close_binance_price: optionalDouble, final_binance_distance_basis_points: optionalDouble, final_binance_minus_chainlink_basis_points: optionalDouble,
   maximum_up_price: optionalDouble, maximum_down_price: optionalDouble,
@@ -37,7 +37,7 @@ export const marketSummaryParquetSchema: ParquetSchemaDefinition = {
 };
 
 export const strategyTrainingRowsParquetSchema: ParquetSchemaDefinition = {
-  market_slug: { type: 'UTF8' }, condition_id: optionalUtf8, timestamp_milliseconds: { type: 'INT64' }, seconds_left: { type: 'INT64' }, target_price: { type: 'DOUBLE' }, up_price: optionalDouble, down_price: optionalDouble,
+  market_slug: { type: 'UTF8' }, condition_id: optionalUtf8, market_duration: { type: 'UTF8' }, timestamp_milliseconds: { type: 'INT64' }, seconds_left: { type: 'INT64' }, target_price: { type: 'DOUBLE' }, up_price: optionalDouble, down_price: optionalDouble,
   primary_price_source_name: { type: 'UTF8' }, primary_price: { type: 'DOUBLE' }, primary_timestamp_milliseconds: { type: 'INT64' }, primary_distance_usd: { type: 'DOUBLE' }, primary_distance_basis_points: { type: 'DOUBLE' },
   binance_price: optionalDouble, binance_timestamp_milliseconds: optionalInt64, binance_distance_usd: optionalDouble, binance_distance_basis_points: optionalDouble, binance_minus_chainlink_basis_points: optionalDouble,
   up_price_change_previous_1_point: optionalDouble, down_price_change_previous_1_point: optionalDouble, up_price_change_previous_2_points: optionalDouble, down_price_change_previous_2_points: optionalDouble, up_price_change_previous_3_points: optionalDouble, down_price_change_previous_3_points: optionalDouble,
@@ -49,5 +49,5 @@ export const strategyTrainingRowsParquetSchema: ParquetSchemaDefinition = {
 };
 
 export const rejectedMarketsParquetSchema: ParquetSchemaDefinition = {
-  market_slug: optionalUtf8, condition_id: optionalUtf8, question: optionalUtf8, rejection_reason: { type: 'UTF8' }, raw_market_file_path: { type: 'UTF8' }, data_quality_flags: { type: 'UTF8' },
+  market_slug: optionalUtf8, condition_id: optionalUtf8, question: optionalUtf8, detected_market_duration: optionalUtf8, rejection_reason: { type: 'UTF8' }, raw_market_file_path: { type: 'UTF8' }, data_quality_flags: { type: 'UTF8' },
 };

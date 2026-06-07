@@ -15,6 +15,7 @@ export function buildMarketSummary(market: NormalizedMarket, pricePoints: Normal
   return {
     marketSlug: market.marketSlug,
     conditionId: market.conditionId,
+    marketDuration: market.marketDuration,
     marketStartTimestampMilliseconds: market.marketStartTimestampMilliseconds,
     marketEndTimestampMilliseconds: market.marketEndTimestampMilliseconds,
     targetPrice: market.targetPrice ?? 0,

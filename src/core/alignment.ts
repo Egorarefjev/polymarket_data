@@ -89,6 +89,7 @@ export function buildNormalizedPricePointsForMarketWithSkipCount(parameters: Bui
       {
         marketSlug: market.marketSlug,
         conditionId: market.conditionId,
+        marketDuration: market.marketDuration,
         timestampMilliseconds,
         secondsLeft: calculateSecondsLeft(market.marketEndTimestampMilliseconds, timestampMilliseconds),
         targetPrice: market.targetPrice ?? 0,
@@ -216,7 +217,7 @@ export function buildPriceHistoryQualityFlags(
   const metrics = calculatePriceHistoryQualityMetrics(priceHistory);
   const flags: string[] = [];
   if (metrics.pointsCount === 0) flags.push('price_history_empty', `price_history_missing_${outcome}`);
-  if (metrics.pointsCount < 3) flags.push('price_history_too_few_points_for_five_minute_market');
+  if (metrics.pointsCount < minimumExpectedPricePointsForDuration(market.marketDuration)) flags.push('price_history_too_few_points_for_duration');
   if (metrics.medianGapMilliseconds !== null && metrics.medianGapMilliseconds > requestedFidelityMinutes * 60_000 * 2) flags.push('price_history_too_coarse');
   if (metrics.minimumTimestampMilliseconds === null || metrics.minimumTimestampMilliseconds > market.marketStartTimestampMilliseconds + requestedFidelityMinutes * 60_000 * 2) {
     flags.push('price_history_does_not_cover_market_start');
@@ -251,4 +252,10 @@ function thresholdSuffix(threshold: number): string {
 
 function lastPresentPrice(prices: Array<number | null>): number | null {
   return [...prices].reverse().find((price): price is number => price !== null) ?? null;
+}
+
+function minimumExpectedPricePointsForDuration(marketDuration: NormalizedMarket['marketDuration']): number {
+  if (marketDuration === '1h') return 10;
+  if (marketDuration === '4h') return 30;
+  return 100;
 }

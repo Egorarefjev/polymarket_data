@@ -1,5 +1,7 @@
 export type MarketOutcome = 'Up' | 'Down' | 'Yes' | 'No' | 'Unknown';
 export type MarketWinner = 'up' | 'down' | 'unknown' | null;
+export type MarketDuration = '1h' | '4h' | '1d';
+export type RequestedMarketDuration = MarketDuration | 'all';
 export type ExternalPriceSourceName = 'chainlink' | 'binance' | string;
 export type PrimaryPriceSourceName = 'chainlink' | 'binance_proxy';
 
@@ -7,6 +9,7 @@ export interface NormalizedMarket {
   marketSlug: string;
   conditionId: string | null;
   question: string;
+  marketDuration: MarketDuration;
   marketStartTimestampMilliseconds: number;
   marketEndTimestampMilliseconds: number;
   upTokenId: string | null;
@@ -27,6 +30,7 @@ export interface RejectedMarket {
   rejectionReason: string;
   rawMarketFilePath: string;
   dataQualityFlags: string[];
+  detectedMarketDuration?: MarketDuration | null;
 }
 
 export interface PriceHistoryPoint {
@@ -85,6 +89,7 @@ export interface FuturePriceLabels {
 export interface NormalizedPricePoint extends FuturePriceLabels {
   marketSlug: string;
   conditionId: string | null;
+  marketDuration: MarketDuration;
   timestampMilliseconds: number;
   secondsLeft: number;
   targetPrice: number;
@@ -112,6 +117,7 @@ export interface NormalizedPricePoint extends FuturePriceLabels {
 export interface MarketSummary {
   marketSlug: string;
   conditionId: string | null;
+  marketDuration: MarketDuration;
   marketStartTimestampMilliseconds: number;
   marketEndTimestampMilliseconds: number;
   targetPrice: number;
@@ -165,6 +171,7 @@ export interface MarketSummary {
 export interface StrategyTrainingRow {
   marketSlug: string;
   conditionId: string | null;
+  marketDuration: MarketDuration;
   timestampMilliseconds: number;
   secondsLeft: number;
   targetPrice: number;
