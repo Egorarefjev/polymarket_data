@@ -12,7 +12,7 @@ The collector downloads public data and normalizes it into analysis tables:
 - `data/processed/market_summary_<start>_<end>.parquet`
 - `data/processed/rejected_markets_<start>_<end>.parquet`
 
-By default it does **not** write debug JSON mirrors because month/year runs can create very large files. Use `--write-debug-json true` only for small sample runs when you want easy local inspection without decoding Parquet.
+Parquet files are the durable outputs. By default the collector does **not** write debug JSON mirrors because month/year runs can create very large files. Use `--write-debug-json true` only for small sample runs when you want easy local inspection without decoding Parquet.
 
 The normalized dataset is meant to answer questions such as:
 
@@ -120,7 +120,7 @@ Timestamps may be seconds, milliseconds, or microseconds; they are normalized to
 
 `price_points.parquet` is the primary analytical dataset. It stores the full available Polymarket prices-history trajectory for every market: if a market has 5 points, all 5 points are stored; if it has 20 points, all 20 points are stored. The collector does not keep only threshold hits, maxima/minima, first threshold hits, or any other reduced subset.
 
-`market_summary.parquet` is a derived aggregate summary over the full trajectory. `build-dataset` writes it directly from in-memory price points, so `npm run collector -- all` does not require debug JSON. Threshold fields are useful summary features, but they do not replace the full history.
+`market_summary.parquet` is a derived aggregate summary over the full trajectory. `build-dataset` and `all` write it directly from fresh in-memory price points, so normal collection does not require debug JSON and cannot accidentally summarize from stale debug mirrors. Threshold fields are useful summary features, but they do not replace the full history.
 
 Polymarket CLOB `prices-history` can be coarse in time, commonly 1-minute granularity even for 5-minute markets. If you need tick-level or per-second movement, you need a live WebSocket logger or a paid historical provider. Public price-history is not a full historical orderbook replay.
 
@@ -235,7 +235,9 @@ The state file under `data/state/` records completed steps so a failed pipeline 
 
 ### Debug JSON and large runs
 
-`--write-debug-json` defaults to `false`. Keep it disabled for real collection and use the Parquet files (`price_points.parquet`, `strategy_training_rows.parquet`, and `market_summary.parquet`) as the durable outputs. Enable `--write-debug-json true` only for small smoke/sample runs where writing `price_points.debug.json` and `strategy_training_rows.debug.json` will not create excessive disk or memory pressure. The standalone `summarize` command is a compatibility wrapper that reads debug JSON; if debug JSON is absent, use the summary written by `all`/`build-dataset`.
+`--write-debug-json` defaults to `false`. Keep it disabled for real collection and use the Parquet files (`price_points.parquet`, `strategy_training_rows.parquet`, and `market_summary.parquet`) as the durable outputs. Debug JSON mirrors (`price_points_*.debug.json` and `strategy_training_rows_*.debug.json`) are optional inspection files for small smoke/sample runs only. When `--write-debug-json false`, `build-dataset` and `all` remove old debug JSON mirrors for the same date range after writing fresh Parquet outputs, preventing stale debug files from being reused later.
+
+The standalone `summarize` command is debug-only compatibility tooling. It reads `price_points_*.debug.json`, therefore it requires `--write-debug-json true` and fails otherwise. For normal collection, use `all` or `build-dataset`; they write `market_summary.parquet` directly from fresh in-memory `price_points` and do not depend on debug JSON.
 
 ### Binance aggTrades memory warning
 

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, access, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 export class FileStorage {
@@ -50,6 +50,16 @@ export class FileStorage {
     await mkdir(dirname(absoluteFilePath), { recursive: true });
     await writeFile(absoluteFilePath, `${values.map((value) => JSON.stringify(value)).join('\n')}\n`, 'utf8');
     return true;
+  }
+
+  public async deleteIfExists(relativeFilePath: string): Promise<boolean> {
+    try {
+      await unlink(this.resolve(relativeFilePath));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
   }
 
   public async readJson<T>(relativeFilePath: string): Promise<T> {

@@ -206,24 +206,32 @@ export class CollectorUseCases {
     await this.parquetWriter.writeRows(this.fileStorage.resolve(processedPricePointsRelativeFilePath(options)), pricePointsParquetSchema, allPricePoints.map(toPricePointParquetRow));
     await this.parquetWriter.writeRows(this.fileStorage.resolve(processedStrategyTrainingRowsRelativeFilePath(options)), strategyTrainingRowsParquetSchema, strategyTrainingRows.map(toStrategyTrainingRowParquetRow));
     await this.writeMarketSummariesFromPricePoints(options, markets, allPricePoints);
+    let deletedDebugJsonFiles = 0;
     if (options.writeDebugJson) {
       await this.fileStorage.writeJson(processedPricePointsDebugRelativeFilePath(options), allPricePoints, true);
       await this.fileStorage.writeJson(processedStrategyTrainingRowsDebugRelativeFilePath(options), strategyTrainingRows, true);
+    } else {
+      const deletedDebugJsonResults = await Promise.all([
+        this.fileStorage.deleteIfExists(processedPricePointsDebugRelativeFilePath(options)),
+        this.fileStorage.deleteIfExists(processedStrategyTrainingRowsDebugRelativeFilePath(options)),
+      ]);
+      deletedDebugJsonFiles = deletedDebugJsonResults.filter((wasDeleted) => wasDeleted).length;
+      this.logger.info({ deletedDebugJsonFiles }, 'Stale debug JSON cleanup completed');
     }
     const existingRejectedMarkets = (await this.fileStorage.exists(rejectedMarketsRelativeFilePath(options)))
       ? await this.fileStorage.readJsonLines<RejectedMarket>(rejectedMarketsRelativeFilePath(options))
       : [];
     await this.writeRejectedMarketsParquet(options, [...existingRejectedMarkets, ...rejectedMarkets]);
-    this.logger.info({ pricePointsBuilt: allPricePoints.length, strategyTrainingRowsBuilt: strategyTrainingRows.length, additionalRejectedMarkets: rejectedMarkets.length, skippedRowsMissingPrimaryPriceBeforeTimestamp, writeDebugJson: options.writeDebugJson }, 'Dataset build completed');
+    this.logger.info({ pricePointsBuilt: allPricePoints.length, strategyTrainingRowsBuilt: strategyTrainingRows.length, additionalRejectedMarkets: rejectedMarkets.length, skippedRowsMissingPrimaryPriceBeforeTimestamp, writeDebugJson: options.writeDebugJson, deletedDebugJsonFiles }, 'Dataset build completed');
     return { pricePoints: allPricePoints, strategyTrainingRows };
   }
 
   public async summarizeMarkets(options: CollectorOptions): Promise<void> {
-    const markets = await this.readAcceptedMarkets(options);
-    const pricePoints = await this.readBuiltPricePointsDebugJsonIfPresent(options);
-    if (pricePoints.length === 0) {
-      throw new Error('summarize requires debug JSON or use all/build-dataset summary output');
+    if (options.writeDebugJson !== true) {
+      throw new Error('Standalone summarize reads debug JSON and is only allowed with --write-debug-json true. For normal runs use all/build-dataset, which writes market_summary.parquet directly from fresh in-memory price_points.');
     }
+    const markets = await this.readAcceptedMarkets(options);
+    const pricePoints = await this.readBuiltPricePointsDebugJson(options);
     await this.writeMarketSummariesFromPricePoints(options, markets, pricePoints);
   }
 
@@ -282,10 +290,10 @@ export class CollectorUseCases {
     return allPricePoints;
   }
 
-  private async readBuiltPricePointsDebugJsonIfPresent(options: CollectorOptions): Promise<NormalizedPricePoint[]> {
+  private async readBuiltPricePointsDebugJson(options: CollectorOptions): Promise<NormalizedPricePoint[]> {
     const debugFilePath = processedPricePointsDebugRelativeFilePath(options);
     if (await this.fileStorage.exists(debugFilePath)) return this.fileStorage.readJson<NormalizedPricePoint[]>(debugFilePath);
-    return [];
+    throw new Error(`Standalone summarize requires debug JSON, but ${debugFilePath} does not exist. Run all/build-dataset with --write-debug-json true for this date range first.`);
   }
 }
 
