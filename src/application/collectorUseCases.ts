@@ -5,6 +5,7 @@ import { serializeDataQualityFlags } from '../adapters/parquetWriter.js';
 import type { PolymarketGammaApiAdapter } from '../adapters/polymarketGammaApi.js';
 import type { PolymarketClobApiAdapter } from '../adapters/polymarketClobApi.js';
 import type { BinanceArchiveApiAdapter, BinanceDataType, BinanceMarketType } from '../adapters/binanceArchiveApi.js';
+import type { ExternalPriceSource } from '../adapters/externalPriceSource.js';
 import type { CollectorLogger } from '../adapters/logger.js';
 import type { ExternalPricePoint, NormalizedMarket, NormalizedPricePoint, PriceHistoryPoint, RejectedMarket } from '../core/domain.js';
 import { buildNormalizedPricePointsForMarket, buildPriceHistoryQualityFlags } from '../core/alignment.js';
@@ -24,6 +25,8 @@ export interface CollectorOptions {
   binanceDataType: BinanceDataType;
   primaryPriceSource: 'chainlink';
   includeBinanceSecondarySignal: boolean;
+  chainlinkInputFile?: string;
+  allowProxyPrimaryPriceSourceForDebug: boolean;
 }
 
 export class CollectorUseCases {
@@ -36,6 +39,8 @@ export class CollectorUseCases {
     private readonly clobApiAdapter: PolymarketClobApiAdapter,
     private readonly binanceArchiveApiAdapter: BinanceArchiveApiAdapter,
     private readonly logger: CollectorLogger,
+    private readonly primaryExternalPriceSource?: ExternalPriceSource,
+    private readonly optionalSecondaryExternalPriceSource?: ExternalPriceSource,
   ) {
     this.stateRepository = new StateRepository(fileStorage);
   }
@@ -132,7 +137,15 @@ export class CollectorUseCases {
   public async buildDataset(options: CollectorOptions): Promise<void> {
     const markets = await this.readAcceptedMarkets(options);
     const chainlinkPricePoints = await this.readChainlinkPricePoints(options);
-    const binancePricePoints = options.includeBinanceSecondarySignal ? await this.readBinancePricePoints(options) : [];
+    const binancePricePoints = (options.includeBinanceSecondarySignal || (chainlinkPricePoints.length === 0 && options.allowProxyPrimaryPriceSourceForDebug)) ? await this.readBinancePricePoints(options) : [];
+    const isProxyPrimaryPriceSourceForDebug = chainlinkPricePoints.length === 0 && options.allowProxyPrimaryPriceSourceForDebug;
+    if (chainlinkPricePoints.length === 0 && !options.allowProxyPrimaryPriceSourceForDebug) {
+      throw new Error('Chainlink input is required for official dataset build. Provide --chainlink-input-file or use --allow-proxy-primary-price-source-for-debug true for non-official proxy testing.');
+    }
+    if (isProxyPrimaryPriceSourceForDebug && binancePricePoints.length === 0) {
+      throw new Error('Binance proxy primary data is required when --allow-proxy-primary-price-source-for-debug true is used without --chainlink-input-file. Run download-binance first or disable proxy debug mode.');
+    }
+    const primaryPricePoints = isProxyPrimaryPriceSourceForDebug ? binancePricePoints : chainlinkPricePoints;
     const allPricePoints: NormalizedPricePoint[] = [];
     const rejectedMarkets: RejectedMarket[] = [];
     let missingChainlinkBeforeTimestampRows = 0;
@@ -143,7 +156,7 @@ export class CollectorUseCases {
         const downPriceHistory = await this.readPriceHistory(options, market.marketSlug, 'down');
         const polymarketTimestamps = [...new Set([...upPriceHistory, ...downPriceHistory].map((pricePoint) => pricePoint.timestampMilliseconds))];
         const hasMissingChainlinkBeforeTimestamp = polymarketTimestamps.some((timestampMilliseconds) =>
-          !chainlinkPricePoints.some((pricePoint) => pricePoint.timestampMilliseconds <= timestampMilliseconds),
+          !primaryPricePoints.some((pricePoint) => pricePoint.timestampMilliseconds <= timestampMilliseconds),
         );
         if (hasMissingChainlinkBeforeTimestamp) missingChainlinkBeforeTimestampRows += 1;
         const dataQualityFlags = [
@@ -151,14 +164,16 @@ export class CollectorUseCases {
           ...(hasMissingChainlinkBeforeTimestamp ? ['chainlink_price_missing_before_timestamp'] : []),
           ...buildPriceHistoryQualityFlags('up', upPriceHistory, market, options.priceFidelityMinutes),
           ...buildPriceHistoryQualityFlags('down', downPriceHistory, market, options.priceFidelityMinutes),
-          ...(chainlinkPricePoints.length === 0 ? ['chainlink_data_unavailable'] : []),
+          ...(isProxyPrimaryPriceSourceForDebug ? ['proxy_primary_price_source_not_official'] : []),
         ];
         const pricePoints = buildNormalizedPricePointsForMarket({
           market: { ...market, dataQualityFlags },
           upPriceHistory,
           downPriceHistory,
-          primaryExternalPricePoints: chainlinkPricePoints,
-          binanceSecondaryPricePoints: binancePricePoints,
+          primaryExternalPricePoints: primaryPricePoints,
+          binanceSecondaryPricePoints: options.includeBinanceSecondarySignal ? binancePricePoints : [],
+          isBinanceSecondarySignalEnabled: options.includeBinanceSecondarySignal,
+          isProxyPrimaryPriceSourceForDebug,
           requestedFidelityMinutes: options.priceFidelityMinutes,
         });
         allPricePoints.push(...pricePoints);
@@ -217,9 +232,9 @@ export class CollectorUseCases {
     return (await this.fileStorage.exists(relativeFilePath)) ? this.fileStorage.readJson<PriceHistoryPoint[]>(relativeFilePath) : [];
   }
 
-  private async readChainlinkPricePoints(_options: CollectorOptions): Promise<ExternalPricePoint[]> {
-    this.logger.warn({ dataQualityFlag: 'chainlink_data_unavailable' }, 'Chainlink BTC/USD Data Stream history is not available from local raw files yet');
-    return [];
+  private async readChainlinkPricePoints(options: CollectorOptions): Promise<ExternalPricePoint[]> {
+    if (this.primaryExternalPriceSource === undefined) return [];
+    return this.primaryExternalPriceSource.getPricePointsForDateRange(options);
   }
 
   private async readBinancePricePoints(options: CollectorOptions): Promise<ExternalPricePoint[]> {

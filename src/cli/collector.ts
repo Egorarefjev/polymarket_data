@@ -7,6 +7,7 @@ import { PolymarketClobApiAdapter } from '../adapters/polymarketClobApi.js';
 import { BinanceArchiveApiAdapter, type BinanceDataType, type BinanceMarketType } from '../adapters/binanceArchiveApi.js';
 import { LocalParquetWriter } from '../adapters/parquetWriter.js';
 import { CollectorUseCases, type CollectorOptions } from '../application/collectorUseCases.js';
+import { ChainlinkLocalFilePriceSource } from '../adapters/externalPriceSource.js';
 
 const program = new Command();
 program.name('polymarket-btc-up-down-collector').description('Public historical data collector for BTC Up/Down 5-minute Polymarket markets');
@@ -17,7 +18,8 @@ function addSharedOptions(command: Command): Command {
     .requiredOption('--end-date <date>')
     .option('--symbol <symbol>', 'Binance symbol', 'BTCUSDT')
     .option('--price-fidelity-minutes <minutes>', 'Polymarket prices-history fidelity in minutes (API minutes, not seconds)', '1')
-    .option('--price-fidelity-seconds <seconds>', 'Deprecated alias; values are interpreted as minutes by Polymarket prices-history')
+    .option('--chainlink-input-file <path>', 'Local Chainlink BTC/USD Data Stream historical CSV, JSON, or JSONL input file')
+    .option('--allow-proxy-primary-price-source-for-debug <trueOrFalse>', 'Use Binance as non-official primary proxy only for pipeline debugging', 'false')
     .option('--force', 'Overwrite existing raw files and rerun completed steps', false)
     .option('--request-delay-milliseconds <milliseconds>', 'Delay between public HTTP requests', '200')
     .option('--maximum-concurrent-requests <count>', 'Maximum concurrent public requests', '4')
@@ -38,12 +40,12 @@ function buildUseCases(options: CollectorOptions): CollectorUseCases {
     new PolymarketClobApiAdapter(httpClient),
     new BinanceArchiveApiAdapter(httpClient),
     logger,
+    options.chainlinkInputFile === undefined ? undefined : new ChainlinkLocalFilePriceSource(options.chainlinkInputFile),
   );
 }
 
 function parseOptions(rawOptions: Record<string, unknown>): CollectorOptions {
-  const rawFidelity = rawOptions['priceFidelityMinutes'] ?? rawOptions['priceFidelitySeconds'];
-  const priceFidelityMinutes = Number(rawFidelity);
+  const priceFidelityMinutes = Number(rawOptions['priceFidelityMinutes']);
   if (!Number.isFinite(priceFidelityMinutes) || priceFidelityMinutes < 1) throw new Error('--price-fidelity-minutes must be a number greater than or equal to 1');
   const binanceMarketType = String(rawOptions['binanceMarketType']) as BinanceMarketType;
   const binanceDataType = String(rawOptions['binanceDataType']) as BinanceDataType;
@@ -51,7 +53,9 @@ function parseOptions(rawOptions: Record<string, unknown>): CollectorOptions {
   if (!['aggTrades', 'klines'].includes(binanceDataType)) throw new Error('--binance-data-type must be aggTrades or klines');
   if (String(rawOptions['primaryPriceSource']) !== 'chainlink') throw new Error('--primary-price-source must be chainlink');
   const includeBinanceSecondarySignal = String(rawOptions['includeBinanceSecondarySignal']).toLowerCase() !== 'false';
-  return {
+  const allowProxyPrimaryPriceSourceForDebug = String(rawOptions['allowProxyPrimaryPriceSourceForDebug']).toLowerCase() === 'true';
+  const chainlinkInputFile = rawOptions['chainlinkInputFile'] === undefined ? undefined : String(rawOptions['chainlinkInputFile']);
+  const options: CollectorOptions = {
     startDate: String(rawOptions['startDate']),
     endDate: String(rawOptions['endDate']),
     symbol: String(rawOptions['symbol']),
@@ -63,7 +67,10 @@ function parseOptions(rawOptions: Record<string, unknown>): CollectorOptions {
     binanceDataType,
     primaryPriceSource: 'chainlink',
     includeBinanceSecondarySignal,
+    allowProxyPrimaryPriceSourceForDebug,
   };
+  if (chainlinkInputFile !== undefined) options.chainlinkInputFile = chainlinkInputFile;
+  return options;
 }
 
 function registerCommand(commandName: string, action: (useCases: CollectorUseCases, options: CollectorOptions) => Promise<void>): void {
