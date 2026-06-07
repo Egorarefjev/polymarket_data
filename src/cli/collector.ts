@@ -26,7 +26,8 @@ function addSharedOptions(command: Command): Command {
     .option('--binance-market-type <type>', 'spot or futures', 'spot')
     .option('--binance-data-type <type>', 'aggTrades or klines', 'aggTrades')
     .option('--primary-price-source <source>', 'Primary analytical price source: chainlink', 'chainlink')
-    .option('--include-binance-secondary-signal <trueOrFalse>', 'Include Binance as optional secondary predictive signal', 'true');
+    .option('--include-binance-secondary-signal <trueOrFalse>', 'Include Binance as optional secondary predictive signal', 'true')
+    .option('--write-debug-json <trueOrFalse>', 'Write large debug JSON mirrors for small sample runs only', 'false');
 }
 
 function buildUseCases(options: CollectorOptions): CollectorUseCases {
@@ -54,6 +55,7 @@ function parseOptions(rawOptions: Record<string, unknown>): CollectorOptions {
   if (String(rawOptions['primaryPriceSource']) !== 'chainlink') throw new Error('--primary-price-source must be chainlink');
   const includeBinanceSecondarySignal = String(rawOptions['includeBinanceSecondarySignal']).toLowerCase() !== 'false';
   const allowProxyPrimaryPriceSourceForDebug = String(rawOptions['allowProxyPrimaryPriceSourceForDebug']).toLowerCase() === 'true';
+  const writeDebugJson = String(rawOptions['writeDebugJson']).toLowerCase() === 'true';
   const chainlinkInputFile = rawOptions['chainlinkInputFile'] === undefined ? undefined : String(rawOptions['chainlinkInputFile']);
   const options: CollectorOptions = {
     startDate: String(rawOptions['startDate']),
@@ -68,12 +70,13 @@ function parseOptions(rawOptions: Record<string, unknown>): CollectorOptions {
     primaryPriceSource: 'chainlink',
     includeBinanceSecondarySignal,
     allowProxyPrimaryPriceSourceForDebug,
+    writeDebugJson,
   };
   if (chainlinkInputFile !== undefined) options.chainlinkInputFile = chainlinkInputFile;
   return options;
 }
 
-function registerCommand(commandName: string, action: (useCases: CollectorUseCases, options: CollectorOptions) => Promise<void>): void {
+function registerCommand(commandName: string, action: (useCases: CollectorUseCases, options: CollectorOptions) => Promise<unknown>): void {
   addSharedOptions(program.command(commandName)).action(async (rawOptions: Record<string, unknown>) => {
     const options = parseOptions(rawOptions);
     await action(buildUseCases(options), options);

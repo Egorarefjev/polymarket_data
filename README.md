@@ -12,7 +12,7 @@ The collector downloads public data and normalizes it into analysis tables:
 - `data/processed/market_summary_<start>_<end>.parquet`
 - `data/processed/rejected_markets_<start>_<end>.parquet`
 
-It also writes debug JSON mirrors for the trajectory and strategy rows so tests and local inspections do not need to decode Parquet.
+By default it does **not** write debug JSON mirrors because month/year runs can create very large files. Use `--write-debug-json true` only for small sample runs when you want easy local inspection without decoding Parquet.
 
 The normalized dataset is meant to answer questions such as:
 
@@ -49,7 +49,8 @@ npm run collector -- all \
   --price-fidelity-minutes 1 \
   --primary-price-source chainlink \
   --chainlink-input-file ./chainlink_btc_usd_2026-05-01.jsonl \
-  --include-binance-secondary-signal true
+  --include-binance-secondary-signal true \
+  --write-debug-json false
 ```
 
 The `end-date` is exclusive, so the example covers exactly `2026-05-01T00:00:00Z` through `2026-05-02T00:00:00Z`.
@@ -65,7 +66,8 @@ npm run collector -- all \
   --symbol BTCUSDT \
   --price-fidelity-minutes 1 \
   --allow-proxy-primary-price-source-for-debug true \
-  --include-binance-secondary-signal false
+  --include-binance-secondary-signal false \
+  --write-debug-json false
 ```
 
 When `all` runs in proxy debug mode without Chainlink, it downloads the required raw Binance files automatically because Binance becomes the non-official primary proxy source. If you run manual stages, run `download-binance` before `build-dataset`.
@@ -118,7 +120,7 @@ Timestamps may be seconds, milliseconds, or microseconds; they are normalized to
 
 `price_points.parquet` is the primary analytical dataset. It stores the full available Polymarket prices-history trajectory for every market: if a market has 5 points, all 5 points are stored; if it has 20 points, all 20 points are stored. The collector does not keep only threshold hits, maxima/minima, first threshold hits, or any other reduced subset.
 
-`market_summary.parquet` is a derived aggregate summary over the full trajectory. Threshold fields are useful summary features, but they do not replace the full history.
+`market_summary.parquet` is a derived aggregate summary over the full trajectory. `build-dataset` writes it directly from in-memory price points, so `npm run collector -- all` does not require debug JSON. Threshold fields are useful summary features, but they do not replace the full history.
 
 Polymarket CLOB `prices-history` can be coarse in time, commonly 1-minute granularity even for 5-minute markets. If you need tick-level or per-second movement, you need a live WebSocket logger or a paid historical provider. Public price-history is not a full historical orderbook replay.
 
@@ -230,3 +232,11 @@ Start with one day and inspect `rejected_markets` and `data_quality_flags`. Then
 6. Keep raw files: resumability depends on not redownloading files that already exist.
 
 The state file under `data/state/` records completed steps so a failed pipeline can be resumed safely.
+
+### Debug JSON and large runs
+
+`--write-debug-json` defaults to `false`. Keep it disabled for real collection and use the Parquet files (`price_points.parquet`, `strategy_training_rows.parquet`, and `market_summary.parquet`) as the durable outputs. Enable `--write-debug-json true` only for small smoke/sample runs where writing `price_points.debug.json` and `strategy_training_rows.debug.json` will not create excessive disk or memory pressure. The standalone `summarize` command is a compatibility wrapper that reads debug JSON; if debug JSON is absent, use the summary written by `all`/`build-dataset`.
+
+### Binance aggTrades memory warning
+
+Binance `aggTrades` files are large. For smoke/debug runs, prefer `--binance-data-type klines`. For serious secondary-signal experiments, `aggTrades` is still supported, but start with 1 day, then 7 days, and inspect disk/memory usage before widening the range. For month/year ranges, prefer chunked runs rather than loading all daily `aggTrades` JSON files for a long date range at once.

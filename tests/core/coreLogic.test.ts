@@ -6,10 +6,10 @@ import { calculateDistanceToTarget, calculateSecondsLeft, normalizeTimestampMill
 import { determineMarketWinner, extractTargetPrice, parseOutcomePrices, parseOutcomes } from '../../src/core/parsing.js';
 import { validateMarketForAnalysis } from '../../src/core/validation.js';
 import { buildMarketSummary } from '../../src/core/summary.js';
-import { buildNormalizedPricePointsForMarket, buildNormalizedPricePointsForMarketWithSkipCount, buildPriceHistoryQualityFlags, findLatestBinancePricePointAtOrBeforeTimestamp } from '../../src/core/alignment.js';
+import { CausalAsOfPriceLookup, buildNormalizedPricePointsForMarket, buildNormalizedPricePointsForMarketWithSkipCount, buildPriceHistoryQualityFlags, findLatestBinancePricePointAtOrBeforeTimestamp, findLatestExternalPricePointAtOrBeforeTimestamp } from '../../src/core/alignment.js';
 import { ChainlinkLocalFilePriceSource, parseChainlinkLocalFilePricePoints } from '../../src/adapters/externalPriceSource.js';
 import { FileStorage } from '../../src/adapters/fileStorage.js';
-import { CollectorUseCases, type CollectorOptions, rawBinanceRelativeFilePath, rawPriceHistoryRelativeFilePath, acceptedMarketsRelativeFilePath, processedPricePointsDebugRelativeFilePath, shouldDownloadBinanceDuringFullPipeline, determinePrimaryPriceMode, buildStrategyTrainingRows } from '../../src/application/collectorUseCases.js';
+import { CollectorUseCases, type CollectorOptions, rawBinanceRelativeFilePath, rawPriceHistoryRelativeFilePath, acceptedMarketsRelativeFilePath, processedPricePointsDebugRelativeFilePath, processedStrategyTrainingRowsDebugRelativeFilePath, processedMarketSummaryRelativeFilePath, shouldDownloadBinanceDuringFullPipeline, determinePrimaryPriceMode, buildStrategyTrainingRows } from '../../src/application/collectorUseCases.js';
 import type { NormalizedMarket, NormalizedPricePoint } from '../../src/core/domain.js';
 
 describe('core calculations', () => {
@@ -148,6 +148,39 @@ describe('causal as-of price alignment', () => {
 
 
 
+
+
+  it('CausalAsOfPriceLookup covers exact, previous, null, after-last, duplicate, and no-future semantics', () => {
+    const sorted = [
+      { timestampMilliseconds: 1_000, price: 100, sourceName: 'chainlink' },
+      { timestampMilliseconds: 2_000, price: 200, sourceName: 'chainlink' },
+      { timestampMilliseconds: 2_000, price: 201, sourceName: 'chainlink' },
+      { timestampMilliseconds: 4_000, price: 400, sourceName: 'chainlink' },
+    ];
+    const lookup = new CausalAsOfPriceLookup(sorted);
+    expect(lookup.findLatestAtOrBefore(2_000)).toBe(sorted[2]);
+    expect(lookup.findLatestAtOrBefore(3_000)).toBe(sorted[2]);
+    expect(lookup.findLatestAtOrBefore(500)).toBeNull();
+    expect(lookup.findLatestAtOrBefore(5_000)).toBe(sorted[3]);
+    expect(lookup.findLatestAtOrBefore(3_999)?.timestampMilliseconds).toBeLessThanOrEqual(3_999);
+    expect(sorted.map((point) => point.price)).toEqual([100, 200, 201, 400]);
+  });
+
+  it('binary-search helper returns correct values on a large sorted external series', () => {
+    const sorted = Array.from({ length: 100_000 }, (_, index) => ({
+      timestampMilliseconds: index * 1_000,
+      price: index,
+      sourceName: 'chainlink',
+    }));
+    const lookup = new CausalAsOfPriceLookup(sorted);
+    for (let index = 0; index < 1_000; index += 1) {
+      const timestampMilliseconds = index * 99_999 + 123;
+      const expectedIndex = Math.min(Math.floor(timestampMilliseconds / 1_000), sorted.length - 1);
+      expect(lookup.findLatestAtOrBefore(timestampMilliseconds)).toBe(sorted[expectedIndex]);
+      expect(findLatestExternalPricePointAtOrBeforeTimestamp(sorted, timestampMilliseconds)).toBe(sorted[expectedIndex]);
+    }
+  });
+
   it('uses Chainlink causal as-of join and never future Chainlink prices', () => {
     const rows = buildNormalizedPricePointsForMarket({
       market: alignmentMarket,
@@ -168,6 +201,26 @@ describe('causal as-of price alignment', () => {
       requestedFidelityMinutes: 1,
     });
     expect(rows.map((row) => row.chainlinkPrice)).toEqual([99_900, 100_100]);
+  });
+
+
+
+  it('uses secondary Binance causal lookup when secondary signal is enabled', () => {
+    const rows = buildNormalizedPricePointsForMarket({
+      market: alignmentMarket,
+      upPriceHistory: [{ timestampMilliseconds: 3_000, price: 0.6 }],
+      downPriceHistory: [{ timestampMilliseconds: 3_000, price: 0.4 }],
+      primaryExternalPricePoints: [{ timestampMilliseconds: 1_000, price: 100_000, sourceName: 'chainlink' }],
+      binanceSecondaryPricePoints: [
+        { timestampMilliseconds: 2_000, price: 100_050, sourceName: 'binance' },
+        { timestampMilliseconds: 4_000, price: 100_500, sourceName: 'binance' },
+      ],
+      isBinanceSecondarySignalEnabled: true,
+      requestedFidelityMinutes: 1,
+    });
+    expect(rows[0]?.binancePrice).toBe(100_050);
+    expect(rows[0]?.binanceTimestampMilliseconds).toBe(2_000);
+    expect(rows[0]?.dataQualityFlags).not.toContain('binance_secondary_signal_missing');
   });
 
   it('does not add Binance missing flag when secondary signal is disabled', () => {
@@ -295,6 +348,31 @@ describe('future labels and strategy training rows', () => {
     expect(strategyRows[0]).toHaveProperty('futureMaximumUpPrice');
     expect(strategyRows[0]).not.toHaveProperty('closePrimaryPrice');
   });
+
+
+  it('preserves the union of UP and DOWN timestamps with nulls for missing sides', () => {
+    const rows = buildNormalizedPricePointsForMarket({
+      market: alignmentMarket,
+      upPriceHistory: [
+        { timestampMilliseconds: 2_000, price: 0.4 },
+        { timestampMilliseconds: 4_000, price: 0.45 },
+        { timestampMilliseconds: 6_000, price: 0.5 },
+      ],
+      downPriceHistory: [
+        { timestampMilliseconds: 3_000, price: 0.6 },
+        { timestampMilliseconds: 4_000, price: 0.55 },
+        { timestampMilliseconds: 5_000, price: 0.5 },
+      ],
+      primaryExternalPricePoints: [{ timestampMilliseconds: 1_000, price: 100_100, sourceName: 'chainlink' }],
+      isBinanceSecondarySignalEnabled: false,
+      requestedFidelityMinutes: 1,
+    });
+    expect(rows.map((row) => row.timestampMilliseconds)).toEqual([2_000, 3_000, 4_000, 5_000, 6_000]);
+    expect(rows.map((row) => row.upPrice)).toEqual([0.4, null, 0.45, null, 0.5]);
+    expect(rows.map((row) => row.downPrice)).toEqual([null, 0.6, 0.55, 0.5, null]);
+    expect(rows.every((row) => row.futureReachesUp090 === false && row.futureReachesDown090 === false)).toBe(true);
+  });
+
 });
 
 describe('price history quality flags', () => {
@@ -363,6 +441,7 @@ describe('full pipeline Binance download decision', () => {
     primaryPriceSource: 'chainlink',
     includeBinanceSecondarySignal: false,
     allowProxyPrimaryPriceSourceForDebug: false,
+    writeDebugJson: false,
   };
 
   function makePipelineUseCases(): CollectorUseCases {
@@ -389,7 +468,7 @@ describe('full pipeline Binance download decision', () => {
     vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
     vi.spyOn(useCases, 'downloadPolymarketTrades').mockResolvedValue(undefined);
     const downloadBinanceSpy = vi.spyOn(useCases, 'downloadBinance').mockResolvedValue(undefined);
-    vi.spyOn(useCases, 'buildDataset').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'buildDataset').mockResolvedValue({ pricePoints: [], strategyTrainingRows: [] });
     vi.spyOn(useCases, 'summarizeMarkets').mockResolvedValue(undefined);
 
     await useCases.runFullPipeline({ ...baseOptions, allowProxyPrimaryPriceSourceForDebug: true, includeBinanceSecondarySignal: false });
@@ -403,7 +482,7 @@ describe('full pipeline Binance download decision', () => {
     vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
     vi.spyOn(useCases, 'downloadPolymarketTrades').mockResolvedValue(undefined);
     const downloadBinanceSpy = vi.spyOn(useCases, 'downloadBinance').mockResolvedValue(undefined);
-    vi.spyOn(useCases, 'buildDataset').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'buildDataset').mockResolvedValue({ pricePoints: [], strategyTrainingRows: [] });
     vi.spyOn(useCases, 'summarizeMarkets').mockResolvedValue(undefined);
 
     await useCases.runFullPipeline({ ...baseOptions, allowProxyPrimaryPriceSourceForDebug: true, includeBinanceSecondarySignal: false, chainlinkInputFile: './chainlink.jsonl' });
@@ -417,7 +496,7 @@ describe('full pipeline Binance download decision', () => {
     vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
     vi.spyOn(useCases, 'downloadPolymarketTrades').mockResolvedValue(undefined);
     const downloadBinanceSpy = vi.spyOn(useCases, 'downloadBinance').mockResolvedValue(undefined);
-    vi.spyOn(useCases, 'buildDataset').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'buildDataset').mockResolvedValue({ pricePoints: [], strategyTrainingRows: [] });
     vi.spyOn(useCases, 'summarizeMarkets').mockResolvedValue(undefined);
 
     await useCases.runFullPipeline({ ...baseOptions, includeBinanceSecondarySignal: true, chainlinkInputFile: './chainlink.jsonl' });
@@ -447,6 +526,7 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
     primaryPriceSource: 'chainlink',
     includeBinanceSecondarySignal: false,
     allowProxyPrimaryPriceSourceForDebug: false,
+    writeDebugJson: true,
   };
 
   function makeMemoryLogger(): { logger: { info: (payload: Record<string, unknown>, message: string) => void; warn: () => void; error: () => void; debug: () => void }; infoEntries: Array<{ payload: Record<string, unknown>; message: string }> } {
@@ -462,16 +542,18 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
     };
   }
 
-  async function makeUseCases(dataDirectoryPath: string, chainlinkInputFile?: string): Promise<{ useCases: CollectorUseCases; fileStorage: FileStorage; infoEntries: Array<{ payload: Record<string, unknown>; message: string }> }> {
+  async function makeUseCases(dataDirectoryPath: string, chainlinkInputFile?: string): Promise<{ useCases: CollectorUseCases; fileStorage: FileStorage; infoEntries: Array<{ payload: Record<string, unknown>; message: string }>; parquetWrites: Array<{ filePath: string; rowCount: number }> }> {
     const fileStorage = new FileStorage(dataDirectoryPath);
     await fileStorage.ensureDataDirectories();
     const { logger, infoEntries } = makeMemoryLogger();
+    const parquetWrites: Array<{ filePath: string; rowCount: number }> = [];
     return {
       fileStorage,
       infoEntries,
+      parquetWrites,
       useCases: new CollectorUseCases(
         fileStorage,
-        { writeRows: async () => undefined } as never,
+        { writeRows: async (filePath: string, _schema: unknown, rows: unknown[]) => { parquetWrites.push({ filePath, rowCount: rows.length }); } } as never,
         {} as never,
         {} as never,
         {} as never,
@@ -578,6 +660,41 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]?.dataQualityFlags).not.toContain('proxy_primary_price_source_not_official');
       expect(rows[0]?.dataQualityFlags).not.toContain('binance_secondary_signal_missing');
+    } finally {
+      await rm(directoryPath, { recursive: true, force: true });
+    }
+  });
+
+
+
+  it('writes no debug JSON by default but still writes market summary parquet', async () => {
+    const directoryPath = await mkdtemp(join(tmpdir(), 'pm-debug-json-off-'));
+    try {
+      const chainlinkPath = join(directoryPath, 'chainlink.jsonl');
+      await writeFile(chainlinkPath, '{"timestampMilliseconds":1,"price":100100}\n', 'utf8');
+      const { useCases, fileStorage, parquetWrites } = await makeUseCases(directoryPath, chainlinkPath);
+      const seededOptions = { ...options, chainlinkInputFile: chainlinkPath, writeDebugJson: false };
+      await seedMarket(fileStorage, seededOptions);
+      await useCases.buildDataset(seededOptions);
+      expect(await fileStorage.exists(processedPricePointsDebugRelativeFilePath(seededOptions))).toBe(false);
+      expect(await fileStorage.exists(processedStrategyTrainingRowsDebugRelativeFilePath(seededOptions))).toBe(false);
+      expect(parquetWrites.some((write) => write.filePath === fileStorage.resolve(processedMarketSummaryRelativeFilePath(seededOptions)) && write.rowCount === 1)).toBe(true);
+    } finally {
+      await rm(directoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it('writes debug JSON when explicitly enabled', async () => {
+    const directoryPath = await mkdtemp(join(tmpdir(), 'pm-debug-json-on-'));
+    try {
+      const chainlinkPath = join(directoryPath, 'chainlink.jsonl');
+      await writeFile(chainlinkPath, '{"timestampMilliseconds":1,"price":100100}\n', 'utf8');
+      const { useCases, fileStorage } = await makeUseCases(directoryPath, chainlinkPath);
+      const seededOptions = { ...options, chainlinkInputFile: chainlinkPath, writeDebugJson: true };
+      await seedMarket(fileStorage, seededOptions);
+      await useCases.buildDataset(seededOptions);
+      expect(await fileStorage.exists(processedPricePointsDebugRelativeFilePath(seededOptions))).toBe(true);
+      expect(await fileStorage.exists(processedStrategyTrainingRowsDebugRelativeFilePath(seededOptions))).toBe(true);
     } finally {
       await rm(directoryPath, { recursive: true, force: true });
     }

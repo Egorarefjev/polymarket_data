@@ -8,7 +8,7 @@ import type { BinanceArchiveApiAdapter, BinanceDataType, BinanceMarketType } fro
 import type { ExternalPriceSource } from '../adapters/externalPriceSource.js';
 import type { CollectorLogger } from '../adapters/logger.js';
 import type { ExternalPricePoint, NormalizedMarket, NormalizedPricePoint, PriceHistoryPoint, RejectedMarket, StrategyTrainingRow } from '../core/domain.js';
-import { buildNormalizedPricePointsForMarketWithSkipCount, buildPriceHistoryQualityFlags } from '../core/alignment.js';
+import { CausalAsOfPriceLookup, buildNormalizedPricePointsForMarketWithSkipCount, buildPriceHistoryQualityFlags, sortExternalPricePointsOnce } from '../core/alignment.js';
 import { buildMarketSummary } from '../core/summary.js';
 import { marketsParquetSchema, marketSummaryParquetSchema, pricePointsParquetSchema, rejectedMarketsParquetSchema, strategyTrainingRowsParquetSchema } from './schemas.js';
 import { StateRepository } from './stateRepository.js';
@@ -27,6 +27,12 @@ export interface CollectorOptions {
   includeBinanceSecondarySignal: boolean;
   chainlinkInputFile?: string;
   allowProxyPrimaryPriceSourceForDebug: boolean;
+  writeDebugJson: boolean;
+}
+
+export interface BuildDatasetResult {
+  pricePoints: NormalizedPricePoint[];
+  strategyTrainingRows: StrategyTrainingRow[];
 }
 
 export class CollectorUseCases {
@@ -134,7 +140,7 @@ export class CollectorUseCases {
     this.logger.info({ binanceFilesDownloaded }, 'Binance archive download completed');
   }
 
-  public async buildDataset(options: CollectorOptions): Promise<void> {
+  public async buildDataset(options: CollectorOptions): Promise<BuildDatasetResult> {
     const markets = await this.readAcceptedMarkets(options);
     const chainlinkPricePoints = await this.readChainlinkPricePoints(options);
     const initialPrimaryPriceMode = determinePrimaryPriceMode(options, chainlinkPricePoints);
@@ -148,6 +154,12 @@ export class CollectorUseCases {
     if (primaryPriceMode.mode === 'missing_primary_price_source') {
       throw new Error('Chainlink input is required for official dataset build. Provide --chainlink-input-file or use --allow-proxy-primary-price-source-for-debug true for non-official proxy testing.');
     }
+
+    const sortedPrimaryPricePoints = sortExternalPricePointsOnce(primaryPriceMode.primaryPricePoints);
+    const sortedBinancePricePoints = sortExternalPricePointsOnce(binancePricePoints);
+    const sortedBinanceSecondaryPricePoints = options.includeBinanceSecondarySignal ? sortedBinancePricePoints : [];
+    const primaryPriceLookup = new CausalAsOfPriceLookup(sortedPrimaryPricePoints);
+    const binanceSecondaryPriceLookup = new CausalAsOfPriceLookup(sortedBinanceSecondaryPricePoints);
 
     const allPricePoints: NormalizedPricePoint[] = [];
     const rejectedMarkets: RejectedMarket[] = [];
@@ -167,9 +179,11 @@ export class CollectorUseCases {
           market: { ...market, dataQualityFlags },
           upPriceHistory,
           downPriceHistory,
-          primaryExternalPricePoints: primaryPriceMode.primaryPricePoints,
+          primaryExternalPricePoints: sortedPrimaryPricePoints,
+          primaryPriceLookup,
           primaryPriceSourceName: primaryPriceMode.mode === 'binance_proxy_debug' ? 'binance_proxy' : 'chainlink',
-          binanceSecondaryPricePoints: options.includeBinanceSecondarySignal ? binancePricePoints : [],
+          binanceSecondaryPricePoints: sortedBinanceSecondaryPricePoints,
+          binanceSecondaryPriceLookup,
           isBinanceSecondarySignalEnabled: options.includeBinanceSecondarySignal,
           isProxyPrimaryPriceSourceForDebug: primaryPriceMode.mode === 'binance_proxy_debug',
           requestedFidelityMinutes: options.priceFidelityMinutes,
@@ -191,21 +205,26 @@ export class CollectorUseCases {
     const strategyTrainingRows = buildStrategyTrainingRows(allPricePoints);
     await this.parquetWriter.writeRows(this.fileStorage.resolve(processedPricePointsRelativeFilePath(options)), pricePointsParquetSchema, allPricePoints.map(toPricePointParquetRow));
     await this.parquetWriter.writeRows(this.fileStorage.resolve(processedStrategyTrainingRowsRelativeFilePath(options)), strategyTrainingRowsParquetSchema, strategyTrainingRows.map(toStrategyTrainingRowParquetRow));
-    await this.fileStorage.writeJson(processedPricePointsDebugRelativeFilePath(options), allPricePoints, true);
-    await this.fileStorage.writeJson(processedStrategyTrainingRowsDebugRelativeFilePath(options), strategyTrainingRows, true);
+    await this.writeMarketSummariesFromPricePoints(options, markets, allPricePoints);
+    if (options.writeDebugJson) {
+      await this.fileStorage.writeJson(processedPricePointsDebugRelativeFilePath(options), allPricePoints, true);
+      await this.fileStorage.writeJson(processedStrategyTrainingRowsDebugRelativeFilePath(options), strategyTrainingRows, true);
+    }
     const existingRejectedMarkets = (await this.fileStorage.exists(rejectedMarketsRelativeFilePath(options)))
       ? await this.fileStorage.readJsonLines<RejectedMarket>(rejectedMarketsRelativeFilePath(options))
       : [];
     await this.writeRejectedMarketsParquet(options, [...existingRejectedMarkets, ...rejectedMarkets]);
-    this.logger.info({ pricePointsBuilt: allPricePoints.length, strategyTrainingRowsBuilt: strategyTrainingRows.length, additionalRejectedMarkets: rejectedMarkets.length, skippedRowsMissingPrimaryPriceBeforeTimestamp }, 'Dataset build completed');
+    this.logger.info({ pricePointsBuilt: allPricePoints.length, strategyTrainingRowsBuilt: strategyTrainingRows.length, additionalRejectedMarkets: rejectedMarkets.length, skippedRowsMissingPrimaryPriceBeforeTimestamp, writeDebugJson: options.writeDebugJson }, 'Dataset build completed');
+    return { pricePoints: allPricePoints, strategyTrainingRows };
   }
 
   public async summarizeMarkets(options: CollectorOptions): Promise<void> {
     const markets = await this.readAcceptedMarkets(options);
     const pricePoints = await this.readBuiltPricePointsDebugJsonIfPresent(options);
-    const summaries = markets.map((market) => buildMarketSummary(market, pricePoints.filter((pricePoint) => pricePoint.marketSlug === market.marketSlug)));
-    await this.parquetWriter.writeRows(this.fileStorage.resolve(processedMarketSummaryRelativeFilePath(options)), marketSummaryParquetSchema, summaries.map(toMarketSummaryParquetRow));
-    this.logger.info({ summariesCreated: summaries.length }, 'Market summaries completed');
+    if (pricePoints.length === 0) {
+      throw new Error('summarize requires debug JSON or use all/build-dataset summary output');
+    }
+    await this.writeMarketSummariesFromPricePoints(options, markets, pricePoints);
   }
 
   public async runFullPipeline(options: CollectorOptions): Promise<void> {
@@ -215,11 +234,18 @@ export class CollectorUseCases {
     // Proxy debug mode without Chainlink needs Binance raw files because Binance becomes the non-official primary proxy source.
     if (shouldDownloadBinanceDuringFullPipeline(options)) await this.downloadBinance(options);
     await this.buildDataset(options);
-    await this.summarizeMarkets(options);
   }
 
   private async writeMarketsParquet(options: CollectorOptions, markets: NormalizedMarket[]): Promise<void> {
     await this.parquetWriter.writeRows(this.fileStorage.resolve(processedMarketsRelativeFilePath(options)), marketsParquetSchema, markets.map(toMarketParquetRow));
+  }
+
+  private async writeMarketSummariesFromPricePoints(options: CollectorOptions, markets: NormalizedMarket[], pricePoints: NormalizedPricePoint[]): Promise<void> {
+    const pricePointsByMarketSlug = new Map<string, NormalizedPricePoint[]>();
+    for (const pricePoint of pricePoints) pricePointsByMarketSlug.set(pricePoint.marketSlug, [...(pricePointsByMarketSlug.get(pricePoint.marketSlug) ?? []), pricePoint]);
+    const summaries = markets.map((market) => buildMarketSummary(market, pricePointsByMarketSlug.get(market.marketSlug) ?? []));
+    await this.parquetWriter.writeRows(this.fileStorage.resolve(processedMarketSummaryRelativeFilePath(options)), marketSummaryParquetSchema, summaries.map(toMarketSummaryParquetRow));
+    this.logger.info({ summariesCreated: summaries.length }, 'Market summaries completed');
   }
 
   private async writeRejectedMarketsParquet(options: CollectorOptions, rejectedMarkets: RejectedMarket[]): Promise<void> {
