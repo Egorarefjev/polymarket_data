@@ -8,6 +8,8 @@ export function buildMarketSummary(market: NormalizedMarket, pricePoints: Normal
     (leftPricePoint, rightPricePoint) => leftPricePoint.timestampMilliseconds - rightPricePoint.timestampMilliseconds,
   );
   const lastPricePoint = orderedPricePoints.at(-1) ?? null;
+  const upStats = priceStats(orderedPricePoints.map((pricePoint) => pricePoint.upPrice));
+  const downStats = priceStats(orderedPricePoints.map((pricePoint) => pricePoint.downPrice));
   const dataQualityFlags = mergeDataQualityFlags(market.dataQualityFlags, ...orderedPricePoints.map((pricePoint) => pricePoint.dataQualityFlags));
 
   return {
@@ -17,13 +19,37 @@ export function buildMarketSummary(market: NormalizedMarket, pricePoints: Normal
     marketEndTimestampMilliseconds: market.marketEndTimestampMilliseconds,
     targetPrice: market.targetPrice ?? 0,
     winner: market.winner,
+    primaryPriceSourceName: lastPricePoint?.primaryPriceSourceName ?? null,
+    closePrimaryPrice: lastPricePoint?.primaryPrice ?? null,
+    finalPrimaryDistanceBasisPoints: lastPricePoint?.primaryDistanceBasisPoints ?? null,
     closeChainlinkPrice: lastPricePoint?.chainlinkPrice ?? null,
     finalChainlinkDistanceBasisPoints: lastPricePoint?.chainlinkDistanceBasisPoints ?? null,
     closeBinancePrice: lastPricePoint?.binancePrice ?? null,
     finalBinanceDistanceBasisPoints: lastPricePoint?.binanceDistanceBasisPoints ?? null,
     finalBinanceMinusChainlinkBasisPoints: lastPricePoint?.binanceMinusChainlinkBasisPoints ?? null,
-    maximumUpPrice: maximumPrice(orderedPricePoints.map((pricePoint) => pricePoint.upPrice)),
-    maximumDownPrice: maximumPrice(orderedPricePoints.map((pricePoint) => pricePoint.downPrice)),
+    maximumUpPrice: upStats.maximum,
+    maximumDownPrice: downStats.maximum,
+    upPriceOpen: upStats.open,
+    downPriceOpen: downStats.open,
+    upPriceClose: upStats.close,
+    downPriceClose: downStats.close,
+    upPriceMinimum: upStats.minimum,
+    upPriceMaximum: upStats.maximum,
+    downPriceMinimum: downStats.minimum,
+    downPriceMaximum: downStats.maximum,
+    upPriceRange: upStats.range,
+    downPriceRange: downStats.range,
+    upPriceLast: upStats.close,
+    downPriceLast: downStats.close,
+    upPriceMean: upStats.mean,
+    downPriceMean: downStats.mean,
+    upPriceMedian: upStats.median,
+    downPriceMedian: downStats.median,
+    upPriceStandardDeviation: upStats.standardDeviation,
+    downPriceStandardDeviation: downStats.standardDeviation,
+    upPriceNumberOfObservations: upStats.count,
+    downPriceNumberOfObservations: downStats.count,
+    pricePointsCount: orderedPricePoints.length,
     firstTimestampUpPriceGreaterThanOrEqual075: firstTimestampAtThreshold(orderedPricePoints, 'upPrice', probabilityThresholds[0]),
     firstTimestampUpPriceGreaterThanOrEqual080: firstTimestampAtThreshold(orderedPricePoints, 'upPrice', probabilityThresholds[1]),
     firstTimestampUpPriceGreaterThanOrEqual090: firstTimestampAtThreshold(orderedPricePoints, 'upPrice', probabilityThresholds[2]),
@@ -40,11 +66,6 @@ export function buildMarketSummary(market: NormalizedMarket, pricePoints: Normal
   };
 }
 
-function maximumPrice(prices: Array<number | null>): number | null {
-  const presentPrices = prices.filter((price): price is number => price !== null);
-  return presentPrices.length === 0 ? null : Math.max(...presentPrices);
-}
-
 function firstTimestampAtThreshold(
   pricePoints: NormalizedPricePoint[],
   priceFieldName: 'upPrice' | 'downPrice',
@@ -59,4 +80,42 @@ function firstSecondsLeftAtThreshold(
   threshold: number,
 ): number | null {
   return pricePoints.find((pricePoint) => (pricePoint[priceFieldName] ?? -Infinity) >= threshold)?.secondsLeft ?? null;
+}
+
+function priceStats(prices: Array<number | null>): {
+  open: number | null;
+  close: number | null;
+  minimum: number | null;
+  maximum: number | null;
+  range: number | null;
+  mean: number | null;
+  median: number | null;
+  standardDeviation: number | null;
+  count: number;
+} {
+  const presentPrices = prices.filter((price): price is number => price !== null);
+  if (presentPrices.length === 0) return { open: null, close: null, minimum: null, maximum: null, range: null, mean: null, median: null, standardDeviation: null, count: 0 };
+  const minimum = Math.min(...presentPrices);
+  const maximum = Math.max(...presentPrices);
+  const mean = presentPrices.reduce((sum, price) => sum + price, 0) / presentPrices.length;
+  const variance = presentPrices.reduce((sum, price) => sum + (price - mean) ** 2, 0) / presentPrices.length;
+  return {
+    open: presentPrices[0] ?? null,
+    close: presentPrices.at(-1) ?? null,
+    minimum,
+    maximum,
+    range: maximum - minimum,
+    mean,
+    median: median(presentPrices),
+    standardDeviation: Math.sqrt(variance),
+    count: presentPrices.length,
+  };
+}
+
+function median(values: number[]): number {
+  const orderedValues = [...values].sort((leftValue, rightValue) => leftValue - rightValue);
+  const middleIndex = Math.floor(orderedValues.length / 2);
+  return orderedValues.length % 2 === 0
+    ? ((orderedValues[middleIndex - 1] ?? 0) + (orderedValues[middleIndex] ?? 0)) / 2
+    : orderedValues[middleIndex] ?? 0;
 }

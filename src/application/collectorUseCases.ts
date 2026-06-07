@@ -7,10 +7,10 @@ import type { PolymarketClobApiAdapter } from '../adapters/polymarketClobApi.js'
 import type { BinanceArchiveApiAdapter, BinanceDataType, BinanceMarketType } from '../adapters/binanceArchiveApi.js';
 import type { ExternalPriceSource } from '../adapters/externalPriceSource.js';
 import type { CollectorLogger } from '../adapters/logger.js';
-import type { ExternalPricePoint, NormalizedMarket, NormalizedPricePoint, PriceHistoryPoint, RejectedMarket } from '../core/domain.js';
+import type { ExternalPricePoint, NormalizedMarket, NormalizedPricePoint, PriceHistoryPoint, RejectedMarket, StrategyTrainingRow } from '../core/domain.js';
 import { buildNormalizedPricePointsForMarketWithSkipCount, buildPriceHistoryQualityFlags } from '../core/alignment.js';
 import { buildMarketSummary } from '../core/summary.js';
-import { marketsParquetSchema, marketSummaryParquetSchema, pricePointsParquetSchema, rejectedMarketsParquetSchema } from './schemas.js';
+import { marketsParquetSchema, marketSummaryParquetSchema, pricePointsParquetSchema, rejectedMarketsParquetSchema, strategyTrainingRowsParquetSchema } from './schemas.js';
 import { StateRepository } from './stateRepository.js';
 
 export interface CollectorOptions {
@@ -137,19 +137,21 @@ export class CollectorUseCases {
   public async buildDataset(options: CollectorOptions): Promise<void> {
     const markets = await this.readAcceptedMarkets(options);
     const chainlinkPricePoints = await this.readChainlinkPricePoints(options);
-    const binancePricePoints = (options.includeBinanceSecondarySignal || (chainlinkPricePoints.length === 0 && options.allowProxyPrimaryPriceSourceForDebug)) ? await this.readBinancePricePoints(options) : [];
-    const isProxyPrimaryPriceSourceForDebug = chainlinkPricePoints.length === 0 && options.allowProxyPrimaryPriceSourceForDebug;
-    if (chainlinkPricePoints.length === 0 && !options.allowProxyPrimaryPriceSourceForDebug) {
-      throw new Error('Chainlink input is required for official dataset build. Provide --chainlink-input-file or use --allow-proxy-primary-price-source-for-debug true for non-official proxy testing.');
-    }
-    if (isProxyPrimaryPriceSourceForDebug && binancePricePoints.length === 0) {
+    const initialPrimaryPriceMode = determinePrimaryPriceMode(options, chainlinkPricePoints);
+    const binancePricePoints = (initialPrimaryPriceMode.mode === 'binance_proxy_debug' || options.includeBinanceSecondarySignal) ? await this.readBinancePricePoints(options) : [];
+    const primaryPriceMode = initialPrimaryPriceMode.mode === 'binance_proxy_debug'
+      ? { ...initialPrimaryPriceMode, primaryPricePoints: binancePricePoints }
+      : initialPrimaryPriceMode;
+    if (primaryPriceMode.mode === 'binance_proxy_debug' && primaryPriceMode.primaryPricePoints.length === 0) {
       throw new Error('Binance proxy primary data is required when --allow-proxy-primary-price-source-for-debug true is used without --chainlink-input-file. Run download-binance first or disable proxy debug mode.');
     }
-    const primaryPricePoints = isProxyPrimaryPriceSourceForDebug ? binancePricePoints : chainlinkPricePoints;
+    if (primaryPriceMode.mode === 'missing_primary_price_source') {
+      throw new Error('Chainlink input is required for official dataset build. Provide --chainlink-input-file or use --allow-proxy-primary-price-source-for-debug true for non-official proxy testing.');
+    }
+
     const allPricePoints: NormalizedPricePoint[] = [];
     const rejectedMarkets: RejectedMarket[] = [];
     let skippedRowsMissingPrimaryPriceBeforeTimestamp = 0;
-    let missingChainlinkBeforeTimestampRows = 0;
 
     for (const market of markets) {
       try {
@@ -159,20 +161,20 @@ export class CollectorUseCases {
           ...market.dataQualityFlags,
           ...buildPriceHistoryQualityFlags('up', upPriceHistory, market, options.priceFidelityMinutes),
           ...buildPriceHistoryQualityFlags('down', downPriceHistory, market, options.priceFidelityMinutes),
-          ...(isProxyPrimaryPriceSourceForDebug ? ['proxy_primary_price_source_not_official'] : []),
+          ...(primaryPriceMode.mode === 'binance_proxy_debug' ? ['proxy_primary_price_source_not_official'] : []),
         ];
         const buildResult = buildNormalizedPricePointsForMarketWithSkipCount({
           market: { ...market, dataQualityFlags },
           upPriceHistory,
           downPriceHistory,
-          primaryExternalPricePoints: primaryPricePoints,
+          primaryExternalPricePoints: primaryPriceMode.primaryPricePoints,
+          primaryPriceSourceName: primaryPriceMode.mode === 'binance_proxy_debug' ? 'binance_proxy' : 'chainlink',
           binanceSecondaryPricePoints: options.includeBinanceSecondarySignal ? binancePricePoints : [],
           isBinanceSecondarySignalEnabled: options.includeBinanceSecondarySignal,
-          isProxyPrimaryPriceSourceForDebug,
+          isProxyPrimaryPriceSourceForDebug: primaryPriceMode.mode === 'binance_proxy_debug',
           requestedFidelityMinutes: options.priceFidelityMinutes,
         });
         skippedRowsMissingPrimaryPriceBeforeTimestamp += buildResult.skippedRowsMissingPrimaryPriceBeforeTimestamp;
-        missingChainlinkBeforeTimestampRows += isProxyPrimaryPriceSourceForDebug ? 0 : buildResult.skippedRowsMissingPrimaryPriceBeforeTimestamp;
         allPricePoints.push(...buildResult.pricePoints);
       } catch (error) {
         rejectedMarkets.push({
@@ -186,13 +188,16 @@ export class CollectorUseCases {
       }
     }
 
+    const strategyTrainingRows = buildStrategyTrainingRows(allPricePoints);
     await this.parquetWriter.writeRows(this.fileStorage.resolve(processedPricePointsRelativeFilePath(options)), pricePointsParquetSchema, allPricePoints.map(toPricePointParquetRow));
+    await this.parquetWriter.writeRows(this.fileStorage.resolve(processedStrategyTrainingRowsRelativeFilePath(options)), strategyTrainingRowsParquetSchema, strategyTrainingRows.map(toStrategyTrainingRowParquetRow));
     await this.fileStorage.writeJson(processedPricePointsDebugRelativeFilePath(options), allPricePoints, true);
+    await this.fileStorage.writeJson(processedStrategyTrainingRowsDebugRelativeFilePath(options), strategyTrainingRows, true);
     const existingRejectedMarkets = (await this.fileStorage.exists(rejectedMarketsRelativeFilePath(options)))
       ? await this.fileStorage.readJsonLines<RejectedMarket>(rejectedMarketsRelativeFilePath(options))
       : [];
     await this.writeRejectedMarketsParquet(options, [...existingRejectedMarkets, ...rejectedMarkets]);
-    this.logger.info({ pricePointsBuilt: allPricePoints.length, additionalRejectedMarkets: rejectedMarkets.length, skippedRowsMissingPrimaryPriceBeforeTimestamp, missingChainlinkBeforeTimestampRows }, 'Dataset build completed');
+    this.logger.info({ pricePointsBuilt: allPricePoints.length, strategyTrainingRowsBuilt: strategyTrainingRows.length, additionalRejectedMarkets: rejectedMarkets.length, skippedRowsMissingPrimaryPriceBeforeTimestamp }, 'Dataset build completed');
   }
 
   public async summarizeMarkets(options: CollectorOptions): Promise<void> {
@@ -207,6 +212,7 @@ export class CollectorUseCases {
     await this.discoverMarkets(options);
     await this.downloadPolymarketPrices(options);
     await this.downloadPolymarketTrades(options);
+    // Proxy debug mode without Chainlink needs Binance raw files because Binance becomes the non-official primary proxy source.
     if (shouldDownloadBinanceDuringFullPipeline(options)) await this.downloadBinance(options);
     await this.buildDataset(options);
     await this.summarizeMarkets(options);
@@ -274,9 +280,30 @@ export function enumerateDates(startDate: string, endDate: string): string[] {
 }
 
 
+export type PrimaryPriceMode =
+  | { mode: 'official_chainlink'; primaryPricePoints: ExternalPricePoint[] }
+  | { mode: 'binance_proxy_debug'; primaryPricePoints: ExternalPricePoint[] }
+  | { mode: 'missing_primary_price_source' };
+
+export function determinePrimaryPriceMode(options: Pick<CollectorOptions, 'chainlinkInputFile' | 'allowProxyPrimaryPriceSourceForDebug'>, chainlinkPricePoints: ExternalPricePoint[]): PrimaryPriceMode {
+  if (options.chainlinkInputFile !== undefined) {
+    if (chainlinkPricePoints.length === 0) {
+      throw new Error('Chainlink input file was provided but contains zero valid price points. Refusing to fallback to Binance proxy because official Chainlink mode was requested.');
+    }
+    return { mode: 'official_chainlink', primaryPricePoints: chainlinkPricePoints };
+  }
+  if (options.allowProxyPrimaryPriceSourceForDebug === true) return { mode: 'binance_proxy_debug', primaryPricePoints: [] };
+  throw new Error('Chainlink input is required for official dataset build. Provide --chainlink-input-file or use --allow-proxy-primary-price-source-for-debug true for non-official proxy testing.');
+}
+
 export function shouldDownloadBinanceDuringFullPipeline(options: Pick<CollectorOptions, 'includeBinanceSecondarySignal' | 'allowProxyPrimaryPriceSourceForDebug' | 'chainlinkInputFile'>): boolean {
-  // Proxy debug mode without Chainlink needs Binance raw files because Binance becomes the non-official primary proxy source.
-  return options.includeBinanceSecondarySignal || (options.allowProxyPrimaryPriceSourceForDebug && options.chainlinkInputFile === undefined);
+  return (
+    options.includeBinanceSecondarySignal === true ||
+    (
+      options.chainlinkInputFile === undefined &&
+      options.allowProxyPrimaryPriceSourceForDebug === true
+    )
+  );
 }
 
 export function dateRangeStateKey(options: Pick<CollectorOptions, 'startDate' | 'endDate'>): string { return `${options.startDate}_${options.endDate}`; }
@@ -289,9 +316,69 @@ export function processedMarketsRelativeFilePath(options: Pick<CollectorOptions,
 export function processedPricePointsRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate'>): string { return `processed/price_points_${dateRangeStateKey(options)}.parquet`; }
 export function processedPricePointsDebugRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate'>): string { return `processed/price_points_${dateRangeStateKey(options)}.debug.json`; }
 export function processedMarketSummaryRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate'>): string { return `processed/market_summary_${dateRangeStateKey(options)}.parquet`; }
+export function processedStrategyTrainingRowsRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate'>): string { return `processed/strategy_training_rows_${dateRangeStateKey(options)}.parquet`; }
+export function processedStrategyTrainingRowsDebugRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate'>): string { return `processed/strategy_training_rows_${dateRangeStateKey(options)}.debug.json`; }
 export function processedRejectedMarketsRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate'>): string { return `processed/rejected_markets_${dateRangeStateKey(options)}.parquet`; }
 
+export function buildStrategyTrainingRows(pricePoints: NormalizedPricePoint[]): StrategyTrainingRow[] {
+  const byMarket = new Map<string, NormalizedPricePoint[]>();
+  for (const pricePoint of pricePoints) byMarket.set(pricePoint.marketSlug, [...(byMarket.get(pricePoint.marketSlug) ?? []), pricePoint]);
+  return [...byMarket.values()].flatMap((marketPricePoints) => {
+    const ordered = [...marketPricePoints].sort((left, right) => left.timestampMilliseconds - right.timestampMilliseconds);
+    return ordered.map((pricePoint, index): StrategyTrainingRow => ({
+      marketSlug: pricePoint.marketSlug,
+      conditionId: pricePoint.conditionId,
+      timestampMilliseconds: pricePoint.timestampMilliseconds,
+      secondsLeft: pricePoint.secondsLeft,
+      targetPrice: pricePoint.targetPrice,
+      upPrice: pricePoint.upPrice,
+      downPrice: pricePoint.downPrice,
+      primaryPriceSourceName: pricePoint.primaryPriceSourceName,
+      primaryPrice: pricePoint.primaryPrice,
+      primaryTimestampMilliseconds: pricePoint.primaryTimestampMilliseconds,
+      primaryDistanceUsd: pricePoint.primaryDistanceUsd,
+      primaryDistanceBasisPoints: pricePoint.primaryDistanceBasisPoints,
+      binancePrice: pricePoint.binancePrice,
+      binanceTimestampMilliseconds: pricePoint.binanceTimestampMilliseconds,
+      binanceDistanceUsd: pricePoint.binanceDistanceUsd,
+      binanceDistanceBasisPoints: pricePoint.binanceDistanceBasisPoints,
+      binanceMinusChainlinkBasisPoints: pricePoint.binanceMinusChainlinkBasisPoints,
+      upPriceChangePrevious1Point: previousPriceChange(ordered, index, 'upPrice', 1),
+      downPriceChangePrevious1Point: previousPriceChange(ordered, index, 'downPrice', 1),
+      upPriceChangePrevious2Points: previousPriceChange(ordered, index, 'upPrice', 2),
+      downPriceChangePrevious2Points: previousPriceChange(ordered, index, 'downPrice', 2),
+      upPriceChangePrevious3Points: previousPriceChange(ordered, index, 'upPrice', 3),
+      downPriceChangePrevious3Points: previousPriceChange(ordered, index, 'downPrice', 3),
+      winner: pricePoint.winner,
+      upWinsBinary: pricePoint.winner === 'up' ? 1 : pricePoint.winner === 'down' ? 0 : null,
+      futureMaximumUpPrice: pricePoint.futureMaximumUpPrice,
+      futureMaximumDownPrice: pricePoint.futureMaximumDownPrice,
+      futureMinimumUpPrice: pricePoint.futureMinimumUpPrice,
+      futureMinimumDownPrice: pricePoint.futureMinimumDownPrice,
+      futureFinalUpPrice: pricePoint.futureFinalUpPrice,
+      futureFinalDownPrice: pricePoint.futureFinalDownPrice,
+      futureSecondsUntilUpPriceGreaterThanOrEqual090: pricePoint.futureSecondsUntilUpPriceGreaterThanOrEqual090,
+      futureSecondsUntilDownPriceGreaterThanOrEqual090: pricePoint.futureSecondsUntilDownPriceGreaterThanOrEqual090,
+      futureReachesUp090: pricePoint.futureReachesUp090,
+      futureReachesUp095: pricePoint.futureReachesUp095,
+      futureReachesUp099: pricePoint.futureReachesUp099,
+      futureReachesDown090: pricePoint.futureReachesDown090,
+      futureReachesDown095: pricePoint.futureReachesDown095,
+      futureReachesDown099: pricePoint.futureReachesDown099,
+      dataQualityFlags: pricePoint.dataQualityFlags,
+    }));
+  });
+}
+
+function previousPriceChange(pricePoints: NormalizedPricePoint[], index: number, fieldName: 'upPrice' | 'downPrice', lag: number): number | null {
+  const currentPrice = pricePoints[index]?.[fieldName] ?? null;
+  const previousPrice = pricePoints[index - lag]?.[fieldName] ?? null;
+  return currentPrice === null || previousPrice === null ? null : currentPrice - previousPrice;
+}
+
 function toMarketParquetRow(market: NormalizedMarket): Record<string, unknown> { return { market_slug: market.marketSlug, condition_id: market.conditionId, question: market.question, market_start_timestamp_milliseconds: market.marketStartTimestampMilliseconds, market_end_timestamp_milliseconds: market.marketEndTimestampMilliseconds, up_token_id: market.upTokenId, down_token_id: market.downTokenId, target_price: market.targetPrice, winner: market.winner, is_resolved: market.isResolved, is_closed: market.isClosed, raw_outcomes: market.rawOutcomes, raw_outcome_prices: market.rawOutcomePrices, data_quality_flags: serializeDataQualityFlags(market.dataQualityFlags) }; }
-function toPricePointParquetRow(pricePoint: NormalizedPricePoint): Record<string, unknown> { return { market_slug: pricePoint.marketSlug, condition_id: pricePoint.conditionId, timestamp_milliseconds: pricePoint.timestampMilliseconds, seconds_left: pricePoint.secondsLeft, target_price: pricePoint.targetPrice, chainlink_price: pricePoint.chainlinkPrice, chainlink_timestamp_milliseconds: pricePoint.chainlinkTimestampMilliseconds, chainlink_distance_usd: pricePoint.chainlinkDistanceUsd, chainlink_distance_basis_points: pricePoint.chainlinkDistanceBasisPoints, binance_price: pricePoint.binancePrice, binance_timestamp_milliseconds: pricePoint.binanceTimestampMilliseconds, binance_distance_usd: pricePoint.binanceDistanceUsd, binance_distance_basis_points: pricePoint.binanceDistanceBasisPoints, binance_minus_chainlink_basis_points: pricePoint.binanceMinusChainlinkBasisPoints, up_price: pricePoint.upPrice, down_price: pricePoint.downPrice, winner: pricePoint.winner, is_resolved: pricePoint.isResolved, data_quality_flags: serializeDataQualityFlags(pricePoint.dataQualityFlags) }; }
-function toMarketSummaryParquetRow(summary: ReturnType<typeof buildMarketSummary>): Record<string, unknown> { return { market_slug: summary.marketSlug, condition_id: summary.conditionId, market_start_timestamp_milliseconds: summary.marketStartTimestampMilliseconds, market_end_timestamp_milliseconds: summary.marketEndTimestampMilliseconds, target_price: summary.targetPrice, winner: summary.winner, close_chainlink_price: summary.closeChainlinkPrice, final_chainlink_distance_basis_points: summary.finalChainlinkDistanceBasisPoints, close_binance_price: summary.closeBinancePrice, final_binance_distance_basis_points: summary.finalBinanceDistanceBasisPoints, final_binance_minus_chainlink_basis_points: summary.finalBinanceMinusChainlinkBasisPoints, maximum_up_price: summary.maximumUpPrice, maximum_down_price: summary.maximumDownPrice, first_timestamp_up_price_greater_than_or_equal_075: summary.firstTimestampUpPriceGreaterThanOrEqual075, first_timestamp_up_price_greater_than_or_equal_080: summary.firstTimestampUpPriceGreaterThanOrEqual080, first_timestamp_up_price_greater_than_or_equal_090: summary.firstTimestampUpPriceGreaterThanOrEqual090, first_timestamp_up_price_greater_than_or_equal_095: summary.firstTimestampUpPriceGreaterThanOrEqual095, first_timestamp_up_price_greater_than_or_equal_099: summary.firstTimestampUpPriceGreaterThanOrEqual099, seconds_left_at_first_up_price_greater_than_or_equal_090: summary.secondsLeftAtFirstUpPriceGreaterThanOrEqual090, first_timestamp_down_price_greater_than_or_equal_075: summary.firstTimestampDownPriceGreaterThanOrEqual075, first_timestamp_down_price_greater_than_or_equal_080: summary.firstTimestampDownPriceGreaterThanOrEqual080, first_timestamp_down_price_greater_than_or_equal_090: summary.firstTimestampDownPriceGreaterThanOrEqual090, first_timestamp_down_price_greater_than_or_equal_095: summary.firstTimestampDownPriceGreaterThanOrEqual095, first_timestamp_down_price_greater_than_or_equal_099: summary.firstTimestampDownPriceGreaterThanOrEqual099, seconds_left_at_first_down_price_greater_than_or_equal_090: summary.secondsLeftAtFirstDownPriceGreaterThanOrEqual090, data_quality_flags: serializeDataQualityFlags(summary.dataQualityFlags) }; }
+function toPricePointParquetRow(pricePoint: NormalizedPricePoint): Record<string, unknown> { return { market_slug: pricePoint.marketSlug, condition_id: pricePoint.conditionId, timestamp_milliseconds: pricePoint.timestampMilliseconds, seconds_left: pricePoint.secondsLeft, target_price: pricePoint.targetPrice, up_price: pricePoint.upPrice, down_price: pricePoint.downPrice, primary_price_source_name: pricePoint.primaryPriceSourceName, primary_price: pricePoint.primaryPrice, primary_timestamp_milliseconds: pricePoint.primaryTimestampMilliseconds, primary_distance_usd: pricePoint.primaryDistanceUsd, primary_distance_basis_points: pricePoint.primaryDistanceBasisPoints, chainlink_price: pricePoint.chainlinkPrice, chainlink_timestamp_milliseconds: pricePoint.chainlinkTimestampMilliseconds, chainlink_distance_usd: pricePoint.chainlinkDistanceUsd, chainlink_distance_basis_points: pricePoint.chainlinkDistanceBasisPoints, binance_price: pricePoint.binancePrice, binance_timestamp_milliseconds: pricePoint.binanceTimestampMilliseconds, binance_distance_usd: pricePoint.binanceDistanceUsd, binance_distance_basis_points: pricePoint.binanceDistanceBasisPoints, binance_minus_chainlink_basis_points: pricePoint.binanceMinusChainlinkBasisPoints, winner: pricePoint.winner, is_resolved: pricePoint.isResolved, data_quality_flags: serializeDataQualityFlags(pricePoint.dataQualityFlags), future_maximum_up_price: pricePoint.futureMaximumUpPrice, future_maximum_down_price: pricePoint.futureMaximumDownPrice, future_minimum_up_price: pricePoint.futureMinimumUpPrice, future_minimum_down_price: pricePoint.futureMinimumDownPrice, future_final_up_price: pricePoint.futureFinalUpPrice, future_final_down_price: pricePoint.futureFinalDownPrice, future_seconds_until_up_price_greater_than_or_equal_075: pricePoint.futureSecondsUntilUpPriceGreaterThanOrEqual075, future_seconds_until_up_price_greater_than_or_equal_080: pricePoint.futureSecondsUntilUpPriceGreaterThanOrEqual080, future_seconds_until_up_price_greater_than_or_equal_090: pricePoint.futureSecondsUntilUpPriceGreaterThanOrEqual090, future_seconds_until_up_price_greater_than_or_equal_095: pricePoint.futureSecondsUntilUpPriceGreaterThanOrEqual095, future_seconds_until_up_price_greater_than_or_equal_099: pricePoint.futureSecondsUntilUpPriceGreaterThanOrEqual099, future_seconds_until_down_price_greater_than_or_equal_075: pricePoint.futureSecondsUntilDownPriceGreaterThanOrEqual075, future_seconds_until_down_price_greater_than_or_equal_080: pricePoint.futureSecondsUntilDownPriceGreaterThanOrEqual080, future_seconds_until_down_price_greater_than_or_equal_090: pricePoint.futureSecondsUntilDownPriceGreaterThanOrEqual090, future_seconds_until_down_price_greater_than_or_equal_095: pricePoint.futureSecondsUntilDownPriceGreaterThanOrEqual095, future_seconds_until_down_price_greater_than_or_equal_099: pricePoint.futureSecondsUntilDownPriceGreaterThanOrEqual099, future_reaches_up_075: pricePoint.futureReachesUp075, future_reaches_up_080: pricePoint.futureReachesUp080, future_reaches_up_090: pricePoint.futureReachesUp090, future_reaches_up_095: pricePoint.futureReachesUp095, future_reaches_up_099: pricePoint.futureReachesUp099, future_reaches_down_075: pricePoint.futureReachesDown075, future_reaches_down_080: pricePoint.futureReachesDown080, future_reaches_down_090: pricePoint.futureReachesDown090, future_reaches_down_095: pricePoint.futureReachesDown095, future_reaches_down_099: pricePoint.futureReachesDown099 }; }
+function toMarketSummaryParquetRow(summary: ReturnType<typeof buildMarketSummary>): Record<string, unknown> { return { market_slug: summary.marketSlug, condition_id: summary.conditionId, market_start_timestamp_milliseconds: summary.marketStartTimestampMilliseconds, market_end_timestamp_milliseconds: summary.marketEndTimestampMilliseconds, target_price: summary.targetPrice, winner: summary.winner, primary_price_source_name: summary.primaryPriceSourceName, close_primary_price: summary.closePrimaryPrice, final_primary_distance_basis_points: summary.finalPrimaryDistanceBasisPoints, close_chainlink_price: summary.closeChainlinkPrice, final_chainlink_distance_basis_points: summary.finalChainlinkDistanceBasisPoints, close_binance_price: summary.closeBinancePrice, final_binance_distance_basis_points: summary.finalBinanceDistanceBasisPoints, final_binance_minus_chainlink_basis_points: summary.finalBinanceMinusChainlinkBasisPoints, maximum_up_price: summary.maximumUpPrice, maximum_down_price: summary.maximumDownPrice, up_price_open: summary.upPriceOpen, down_price_open: summary.downPriceOpen, up_price_close: summary.upPriceClose, down_price_close: summary.downPriceClose, up_price_minimum: summary.upPriceMinimum, up_price_maximum: summary.upPriceMaximum, down_price_minimum: summary.downPriceMinimum, down_price_maximum: summary.downPriceMaximum, up_price_range: summary.upPriceRange, down_price_range: summary.downPriceRange, up_price_last: summary.upPriceLast, down_price_last: summary.downPriceLast, up_price_mean: summary.upPriceMean, down_price_mean: summary.downPriceMean, up_price_median: summary.upPriceMedian, down_price_median: summary.downPriceMedian, up_price_standard_deviation: summary.upPriceStandardDeviation, down_price_standard_deviation: summary.downPriceStandardDeviation, up_price_number_of_observations: summary.upPriceNumberOfObservations, down_price_number_of_observations: summary.downPriceNumberOfObservations, price_points_count: summary.pricePointsCount, first_timestamp_up_price_greater_than_or_equal_075: summary.firstTimestampUpPriceGreaterThanOrEqual075, first_timestamp_up_price_greater_than_or_equal_080: summary.firstTimestampUpPriceGreaterThanOrEqual080, first_timestamp_up_price_greater_than_or_equal_090: summary.firstTimestampUpPriceGreaterThanOrEqual090, first_timestamp_up_price_greater_than_or_equal_095: summary.firstTimestampUpPriceGreaterThanOrEqual095, first_timestamp_up_price_greater_than_or_equal_099: summary.firstTimestampUpPriceGreaterThanOrEqual099, seconds_left_at_first_up_price_greater_than_or_equal_090: summary.secondsLeftAtFirstUpPriceGreaterThanOrEqual090, first_timestamp_down_price_greater_than_or_equal_075: summary.firstTimestampDownPriceGreaterThanOrEqual075, first_timestamp_down_price_greater_than_or_equal_080: summary.firstTimestampDownPriceGreaterThanOrEqual080, first_timestamp_down_price_greater_than_or_equal_090: summary.firstTimestampDownPriceGreaterThanOrEqual090, first_timestamp_down_price_greater_than_or_equal_095: summary.firstTimestampDownPriceGreaterThanOrEqual095, first_timestamp_down_price_greater_than_or_equal_099: summary.firstTimestampDownPriceGreaterThanOrEqual099, seconds_left_at_first_down_price_greater_than_or_equal_090: summary.secondsLeftAtFirstDownPriceGreaterThanOrEqual090, data_quality_flags: serializeDataQualityFlags(summary.dataQualityFlags) }; }
+function toStrategyTrainingRowParquetRow(row: StrategyTrainingRow): Record<string, unknown> { return { market_slug: row.marketSlug, condition_id: row.conditionId, timestamp_milliseconds: row.timestampMilliseconds, seconds_left: row.secondsLeft, target_price: row.targetPrice, up_price: row.upPrice, down_price: row.downPrice, primary_price_source_name: row.primaryPriceSourceName, primary_price: row.primaryPrice, primary_timestamp_milliseconds: row.primaryTimestampMilliseconds, primary_distance_usd: row.primaryDistanceUsd, primary_distance_basis_points: row.primaryDistanceBasisPoints, binance_price: row.binancePrice, binance_timestamp_milliseconds: row.binanceTimestampMilliseconds, binance_distance_usd: row.binanceDistanceUsd, binance_distance_basis_points: row.binanceDistanceBasisPoints, binance_minus_chainlink_basis_points: row.binanceMinusChainlinkBasisPoints, up_price_change_previous_1_point: row.upPriceChangePrevious1Point, down_price_change_previous_1_point: row.downPriceChangePrevious1Point, up_price_change_previous_2_points: row.upPriceChangePrevious2Points, down_price_change_previous_2_points: row.downPriceChangePrevious2Points, up_price_change_previous_3_points: row.upPriceChangePrevious3Points, down_price_change_previous_3_points: row.downPriceChangePrevious3Points, winner: row.winner, up_wins_binary: row.upWinsBinary, future_maximum_up_price: row.futureMaximumUpPrice, future_maximum_down_price: row.futureMaximumDownPrice, future_minimum_up_price: row.futureMinimumUpPrice, future_minimum_down_price: row.futureMinimumDownPrice, future_final_up_price: row.futureFinalUpPrice, future_final_down_price: row.futureFinalDownPrice, future_seconds_until_up_price_greater_than_or_equal_090: row.futureSecondsUntilUpPriceGreaterThanOrEqual090, future_seconds_until_down_price_greater_than_or_equal_090: row.futureSecondsUntilDownPriceGreaterThanOrEqual090, future_reaches_up_090: row.futureReachesUp090, future_reaches_up_095: row.futureReachesUp095, future_reaches_up_099: row.futureReachesUp099, future_reaches_down_090: row.futureReachesDown090, future_reaches_down_095: row.futureReachesDown095, future_reaches_down_099: row.futureReachesDown099, data_quality_flags: serializeDataQualityFlags(row.dataQualityFlags) }; }
+
 function toRejectedMarketParquetRow(rejectedMarket: RejectedMarket): Record<string, unknown> { return { market_slug: rejectedMarket.marketSlug, condition_id: rejectedMarket.conditionId, question: rejectedMarket.question, rejection_reason: rejectedMarket.rejectionReason, raw_market_file_path: rejectedMarket.rawMarketFilePath, data_quality_flags: serializeDataQualityFlags(rejectedMarket.dataQualityFlags) }; }

@@ -9,7 +9,7 @@ import { buildMarketSummary } from '../../src/core/summary.js';
 import { buildNormalizedPricePointsForMarket, buildNormalizedPricePointsForMarketWithSkipCount, buildPriceHistoryQualityFlags, findLatestBinancePricePointAtOrBeforeTimestamp } from '../../src/core/alignment.js';
 import { ChainlinkLocalFilePriceSource, parseChainlinkLocalFilePricePoints } from '../../src/adapters/externalPriceSource.js';
 import { FileStorage } from '../../src/adapters/fileStorage.js';
-import { CollectorUseCases, type CollectorOptions, rawBinanceRelativeFilePath, rawPriceHistoryRelativeFilePath, acceptedMarketsRelativeFilePath, processedPricePointsDebugRelativeFilePath, shouldDownloadBinanceDuringFullPipeline } from '../../src/application/collectorUseCases.js';
+import { CollectorUseCases, type CollectorOptions, rawBinanceRelativeFilePath, rawPriceHistoryRelativeFilePath, acceptedMarketsRelativeFilePath, processedPricePointsDebugRelativeFilePath, shouldDownloadBinanceDuringFullPipeline, determinePrimaryPriceMode, buildStrategyTrainingRows } from '../../src/application/collectorUseCases.js';
 import type { NormalizedMarket, NormalizedPricePoint } from '../../src/core/domain.js';
 
 describe('core calculations', () => {
@@ -76,13 +76,34 @@ describe('market validation and summary', () => {
     expect(validateMarketForAnalysis({ ...market, targetPrice: null }).rejectionReason).toBe('target_price_missing');
   });
 
-  it('builds market summary thresholds', () => {
-    const pricePoints: NormalizedPricePoint[] = [
-      { marketSlug: market.marketSlug, conditionId: market.conditionId, timestampMilliseconds: 101_000, secondsLeft: 200, targetPrice: 100_000, chainlinkPrice: 100_500, chainlinkTimestampMilliseconds: 101_000, chainlinkDistanceUsd: 500, chainlinkDistanceBasisPoints: 50, binancePrice: 100_510, binanceTimestampMilliseconds: 101_000, binanceDistanceUsd: 510, binanceDistanceBasisPoints: 51, binanceMinusChainlinkBasisPoints: 1, upPrice: 0.7, downPrice: 0.3, winner: 'up', isResolved: true, dataQualityFlags: [] },
-      { marketSlug: market.marketSlug, conditionId: market.conditionId, timestampMilliseconds: 201_000, secondsLeft: 100, targetPrice: 100_000, chainlinkPrice: 101_000, chainlinkTimestampMilliseconds: 201_000, chainlinkDistanceUsd: 1_000, chainlinkDistanceBasisPoints: 100, binancePrice: 101_010, binanceTimestampMilliseconds: 201_000, binanceDistanceUsd: 1_010, binanceDistanceBasisPoints: 101, binanceMinusChainlinkBasisPoints: 1, upPrice: 0.92, downPrice: 0.08, winner: 'up', isResolved: true, dataQualityFlags: [] },
-    ];
+  it('builds market summary thresholds and trajectory statistics', () => {
+    const pricePoints = buildNormalizedPricePointsForMarket({
+      market,
+      upPriceHistory: [
+        { timestampMilliseconds: 101_000, price: 0.7 },
+        { timestampMilliseconds: 201_000, price: 0.92 },
+      ],
+      downPriceHistory: [
+        { timestampMilliseconds: 101_000, price: 0.3 },
+        { timestampMilliseconds: 201_000, price: 0.08 },
+      ],
+      primaryExternalPricePoints: [
+        { timestampMilliseconds: 101_000, price: 100_500, sourceName: 'chainlink' },
+        { timestampMilliseconds: 201_000, price: 101_000, sourceName: 'chainlink' },
+      ],
+      binanceSecondaryPricePoints: [
+        { timestampMilliseconds: 101_000, price: 100_510, sourceName: 'binance' },
+        { timestampMilliseconds: 201_000, price: 101_010, sourceName: 'binance' },
+      ],
+      isBinanceSecondarySignalEnabled: true,
+      requestedFidelityMinutes: 1,
+    });
     const summary = buildMarketSummary(market, pricePoints);
     expect(summary.maximumUpPrice).toBe(0.92);
+    expect(summary.pricePointsCount).toBe(2);
+    expect(summary.upPriceOpen).toBe(0.7);
+    expect(summary.upPriceClose).toBe(0.92);
+    expect(summary.closePrimaryPrice).toBe(101_000);
     expect(summary.firstTimestampUpPriceGreaterThanOrEqual090).toBe(201_000);
     expect(summary.secondsLeftAtFirstUpPriceGreaterThanOrEqual090).toBe(100);
   });
@@ -109,20 +130,20 @@ const alignmentMarket: NormalizedMarket = {
 describe('causal as-of price alignment', () => {
   it('chooses the price before the timestamp when one point is before and one is after', () => {
     expect(findLatestBinancePricePointAtOrBeforeTimestamp([
-      { timestampMilliseconds: 1_000, btcPrice: 100 },
-      { timestampMilliseconds: 3_000, btcPrice: 300 },
-    ], 2_000)).toEqual({ timestampMilliseconds: 1_000, btcPrice: 100 });
+      { timestampMilliseconds: 1_000, price: 100, sourceName: 'binance' },
+      { timestampMilliseconds: 3_000, price: 300, sourceName: 'binance' },
+    ], 2_000)).toEqual({ timestampMilliseconds: 1_000, price: 100, sourceName: 'binance' });
   });
 
   it('returns null when only a future price exists', () => {
-    expect(findLatestBinancePricePointAtOrBeforeTimestamp([{ timestampMilliseconds: 3_000, btcPrice: 300 }], 2_000)).toBeNull();
+    expect(findLatestBinancePricePointAtOrBeforeTimestamp([{ timestampMilliseconds: 3_000, price: 300, sourceName: 'binance' }], 2_000)).toBeNull();
   });
 
   it('chooses the exact timestamp when one exists', () => {
     expect(findLatestBinancePricePointAtOrBeforeTimestamp([
-      { timestampMilliseconds: 1_000, btcPrice: 100 },
-      { timestampMilliseconds: 2_000, btcPrice: 200 },
-    ], 2_000)).toEqual({ timestampMilliseconds: 2_000, btcPrice: 200 });
+      { timestampMilliseconds: 1_000, price: 100, sourceName: 'binance' },
+      { timestampMilliseconds: 2_000, price: 200, sourceName: 'binance' },
+    ], 2_000)).toEqual({ timestampMilliseconds: 2_000, price: 200, sourceName: 'binance' });
   });
 
 
@@ -220,6 +241,59 @@ describe('causal as-of price alignment', () => {
     expect(result.pricePoints[0]?.timestampMilliseconds).toBe(2_000);
     expect(result.pricePoints[0]?.dataQualityFlags).not.toContain('primary_price_missing_before_timestamp');
     expect(result.pricePoints[0]?.dataQualityFlags).not.toContain('chainlink_price_missing_before_timestamp');
+  });
+});
+
+describe('future labels and strategy training rows', () => {
+  it('preserves full trajectory, computes future labels inside one market, and builds past-only strategy features', () => {
+    const marketTwo = { ...alignmentMarket, marketSlug: 'btc-updown-5m-second', winner: 'down' as const };
+    const firstMarketRows = buildNormalizedPricePointsForMarket({
+      market: alignmentMarket,
+      upPriceHistory: [
+        { timestampMilliseconds: 2_000, price: 0.4 },
+        { timestampMilliseconds: 3_000, price: 0.91 },
+        { timestampMilliseconds: 4_000, price: 0.7 },
+        { timestampMilliseconds: 5_000, price: 0.95 },
+        { timestampMilliseconds: 6_000, price: 0.6 },
+      ],
+      downPriceHistory: [
+        { timestampMilliseconds: 2_000, price: 0.6 },
+        { timestampMilliseconds: 3_000, price: 0.09 },
+        { timestampMilliseconds: 4_000, price: 0.3 },
+        { timestampMilliseconds: 5_000, price: 0.05 },
+        { timestampMilliseconds: 6_000, price: 0.4 },
+      ],
+      primaryExternalPricePoints: [{ timestampMilliseconds: 1_000, price: 100_100, sourceName: 'chainlink' }],
+      isBinanceSecondarySignalEnabled: false,
+      requestedFidelityMinutes: 1,
+    });
+    const secondMarketRows = buildNormalizedPricePointsForMarket({
+      market: marketTwo,
+      upPriceHistory: [{ timestampMilliseconds: 7_000, price: 0.99 }],
+      downPriceHistory: [{ timestampMilliseconds: 7_000, price: 0.01 }],
+      primaryExternalPricePoints: [{ timestampMilliseconds: 1_000, price: 100_100, sourceName: 'chainlink' }],
+      isBinanceSecondarySignalEnabled: false,
+      requestedFidelityMinutes: 1,
+    });
+
+    expect(firstMarketRows).toHaveLength(5);
+    expect(firstMarketRows.map((row) => row.upPrice)).toEqual([0.4, 0.91, 0.7, 0.95, 0.6]);
+    expect(firstMarketRows[0]?.futureMaximumUpPrice).toBe(0.95);
+    expect(firstMarketRows[0]?.futureSecondsUntilUpPriceGreaterThanOrEqual090).toBe(1);
+    expect(firstMarketRows[4]?.futureSecondsUntilUpPriceGreaterThanOrEqual090).toBeNull();
+    expect(firstMarketRows[4]?.futureReachesUp090).toBe(false);
+    expect(firstMarketRows[4]?.futureMaximumUpPrice).toBe(0.6);
+    expect(secondMarketRows[0]?.futureMaximumUpPrice).toBe(0.99);
+
+    const strategyRows = buildStrategyTrainingRows([...firstMarketRows, ...secondMarketRows]);
+    expect(strategyRows[0]?.winner).toBe('up');
+    expect(strategyRows[0]?.upWinsBinary).toBe(1);
+    expect(strategyRows[0]?.upPriceChangePrevious1Point).toBeNull();
+    expect(strategyRows[1]?.upPriceChangePrevious1Point).toBeCloseTo(0.51);
+    expect(strategyRows[2]?.upPriceChangePrevious2Points).toBeCloseTo(0.3);
+    expect(strategyRows[5]?.upPriceChangePrevious1Point).toBeNull();
+    expect(strategyRows[0]).toHaveProperty('futureMaximumUpPrice');
+    expect(strategyRows[0]).not.toHaveProperty('closePrimaryPrice');
   });
 });
 
@@ -336,6 +410,27 @@ describe('full pipeline Binance download decision', () => {
 
     expect(downloadBinanceSpy).not.toHaveBeenCalled();
   });
+
+  it('runFullPipeline downloads Binance when Chainlink input exists and secondary signal is enabled', async () => {
+    const useCases = makePipelineUseCases();
+    vi.spyOn(useCases, 'discoverMarkets').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'downloadPolymarketTrades').mockResolvedValue(undefined);
+    const downloadBinanceSpy = vi.spyOn(useCases, 'downloadBinance').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'buildDataset').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'summarizeMarkets').mockResolvedValue(undefined);
+
+    await useCases.runFullPipeline({ ...baseOptions, includeBinanceSecondarySignal: true, chainlinkInputFile: './chainlink.jsonl' });
+
+    expect(downloadBinanceSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('determinePrimaryPriceMode refuses empty Chainlink fallback and selects proxy only without Chainlink input', () => {
+    expect(() => determinePrimaryPriceMode({ ...baseOptions, chainlinkInputFile: './empty.csv', allowProxyPrimaryPriceSourceForDebug: true }, [])).toThrow('Refusing to fallback to Binance proxy');
+    expect(determinePrimaryPriceMode({ ...baseOptions, chainlinkInputFile: './valid.csv' }, [{ timestampMilliseconds: 1, price: 100, sourceName: 'chainlink' }]).mode).toBe('official_chainlink');
+    expect(determinePrimaryPriceMode({ ...baseOptions, allowProxyPrimaryPriceSourceForDebug: true }, []).mode).toBe('binance_proxy_debug');
+    expect(() => determinePrimaryPriceMode({ ...baseOptions, allowProxyPrimaryPriceSourceForDebug: false }, [])).toThrow('Chainlink input is required');
+  });
 });
 
 describe('dataset build with Chainlink input and proxy guardrails', () => {
@@ -410,6 +505,23 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
     }
   });
 
+  it('empty and header-only Chainlink input files are fatal and do not fallback to proxy', async () => {
+    for (const fileContent of ['', 'timestamp_milliseconds,price\n']) {
+      const directoryPath = await mkdtemp(join(tmpdir(), 'pm-empty-chainlink-'));
+      try {
+        const chainlinkPath = join(directoryPath, 'chainlink.csv');
+        await writeFile(chainlinkPath, fileContent, 'utf8');
+        const { useCases, fileStorage } = await makeUseCases(directoryPath, chainlinkPath);
+        const seededOptions = { ...options, chainlinkInputFile: chainlinkPath, allowProxyPrimaryPriceSourceForDebug: true };
+        await seedMarket(fileStorage, seededOptions);
+        await fileStorage.writeJson(rawBinanceRelativeFilePath(seededOptions, '2026-05-01'), [{ timestampMilliseconds: 1_000, btcPrice: 100_100 }], true);
+        await expect(useCases.buildDataset(seededOptions)).rejects.toThrow('Refusing to fallback to Binance proxy');
+      } finally {
+        await rm(directoryPath, { recursive: true, force: true });
+      }
+    }
+  });
+
   it('throws clear error when Chainlink input is missing and proxy debug is disabled', async () => {
     const directoryPath = await mkdtemp(join(tmpdir(), 'pm-no-chainlink-'));
     try {
@@ -431,7 +543,9 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
       await useCases.buildDataset(proxyOptions);
       const rows = JSON.parse(await readFile(fileStorage.resolve(processedPricePointsDebugRelativeFilePath(proxyOptions)), 'utf8')) as NormalizedPricePoint[];
       expect(rows).toHaveLength(1);
-      expect(rows[0]?.chainlinkPrice).toBe(100_100);
+      expect(rows[0]?.primaryPriceSourceName).toBe('binance_proxy');
+      expect(rows[0]?.primaryPrice).toBe(100_100);
+      expect(rows[0]?.chainlinkPrice).toBeNull();
       expect(rows.every((row) => row.dataQualityFlags.includes('proxy_primary_price_source_not_official'))).toBe(true);
     } finally {
       await rm(directoryPath, { recursive: true, force: true });
@@ -492,7 +606,7 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
       expect(rows[0]?.dataQualityFlags).not.toContain('chainlink_price_missing_before_timestamp');
       const buildLog = infoEntries.find((entry) => entry.message === 'Dataset build completed');
       expect(buildLog?.payload['skippedRowsMissingPrimaryPriceBeforeTimestamp']).toBe(1);
-      expect(buildLog?.payload['missingChainlinkBeforeTimestampRows']).toBe(1);
+      expect(buildLog?.payload).not.toHaveProperty('missingChainlinkBeforeTimestampRows');
     } finally {
       await rm(directoryPath, { recursive: true, force: true });
     }
