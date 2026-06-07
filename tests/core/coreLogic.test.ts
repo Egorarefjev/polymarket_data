@@ -1,15 +1,15 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { calculateDistanceToTarget, calculateSecondsLeft, normalizeTimestampMilliseconds } from '../../src/core/calculations.js';
 import { determineMarketWinner, extractTargetPrice, parseOutcomePrices, parseOutcomes } from '../../src/core/parsing.js';
 import { validateMarketForAnalysis } from '../../src/core/validation.js';
 import { buildMarketSummary } from '../../src/core/summary.js';
-import { buildNormalizedPricePointsForMarket, buildPriceHistoryQualityFlags, findLatestBinancePricePointAtOrBeforeTimestamp } from '../../src/core/alignment.js';
+import { buildNormalizedPricePointsForMarket, buildNormalizedPricePointsForMarketWithSkipCount, buildPriceHistoryQualityFlags, findLatestBinancePricePointAtOrBeforeTimestamp } from '../../src/core/alignment.js';
 import { ChainlinkLocalFilePriceSource, parseChainlinkLocalFilePricePoints } from '../../src/adapters/externalPriceSource.js';
 import { FileStorage } from '../../src/adapters/fileStorage.js';
-import { CollectorUseCases, type CollectorOptions, rawBinanceRelativeFilePath, rawPriceHistoryRelativeFilePath, acceptedMarketsRelativeFilePath, processedPricePointsDebugRelativeFilePath } from '../../src/application/collectorUseCases.js';
+import { CollectorUseCases, type CollectorOptions, rawBinanceRelativeFilePath, rawPriceHistoryRelativeFilePath, acceptedMarketsRelativeFilePath, processedPricePointsDebugRelativeFilePath, shouldDownloadBinanceDuringFullPipeline } from '../../src/application/collectorUseCases.js';
 import type { NormalizedMarket, NormalizedPricePoint } from '../../src/core/domain.js';
 
 describe('core calculations', () => {
@@ -199,6 +199,28 @@ describe('causal as-of price alignment', () => {
     });
     expect(rows).toEqual([]);
   });
+
+  it('skips only rows missing a prior primary price and does not add missing-before flag to valid rows', () => {
+    const result = buildNormalizedPricePointsForMarketWithSkipCount({
+      market: alignmentMarket,
+      upPriceHistory: [
+        { timestampMilliseconds: 500, price: 0.55 },
+        { timestampMilliseconds: 2_000, price: 0.6 },
+      ],
+      downPriceHistory: [
+        { timestampMilliseconds: 500, price: 0.45 },
+        { timestampMilliseconds: 2_000, price: 0.4 },
+      ],
+      primaryExternalPricePoints: [{ timestampMilliseconds: 1_000, price: 100_100, sourceName: 'chainlink' }],
+      isBinanceSecondarySignalEnabled: false,
+      requestedFidelityMinutes: 1,
+    });
+    expect(result.skippedRowsMissingPrimaryPriceBeforeTimestamp).toBe(1);
+    expect(result.pricePoints).toHaveLength(1);
+    expect(result.pricePoints[0]?.timestampMilliseconds).toBe(2_000);
+    expect(result.pricePoints[0]?.dataQualityFlags).not.toContain('primary_price_missing_before_timestamp');
+    expect(result.pricePoints[0]?.dataQualityFlags).not.toContain('chainlink_price_missing_before_timestamp');
+  });
 });
 
 describe('price history quality flags', () => {
@@ -252,6 +274,70 @@ describe('Chainlink local input parsing', () => {
   });
 });
 
+
+describe('full pipeline Binance download decision', () => {
+  const baseOptions: CollectorOptions = {
+    startDate: '2026-05-01',
+    endDate: '2026-05-02',
+    symbol: 'BTCUSDT',
+    priceFidelityMinutes: 1,
+    force: true,
+    requestDelayMilliseconds: 0,
+    maximumConcurrentRequests: 1,
+    binanceMarketType: 'spot',
+    binanceDataType: 'aggTrades',
+    primaryPriceSource: 'chainlink',
+    includeBinanceSecondarySignal: false,
+    allowProxyPrimaryPriceSourceForDebug: false,
+  };
+
+  function makePipelineUseCases(): CollectorUseCases {
+    return new CollectorUseCases(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+  }
+
+  it('shouldDownloadBinanceDuringFullPipeline matches secondary/proxy guardrails', () => {
+    expect(shouldDownloadBinanceDuringFullPipeline({ ...baseOptions, includeBinanceSecondarySignal: true })).toBe(true);
+    expect(shouldDownloadBinanceDuringFullPipeline({ ...baseOptions, allowProxyPrimaryPriceSourceForDebug: true })).toBe(true);
+    expect(shouldDownloadBinanceDuringFullPipeline({ ...baseOptions, allowProxyPrimaryPriceSourceForDebug: true, chainlinkInputFile: './chainlink.jsonl' })).toBe(false);
+    expect(shouldDownloadBinanceDuringFullPipeline({ ...baseOptions, includeBinanceSecondarySignal: false, allowProxyPrimaryPriceSourceForDebug: false })).toBe(false);
+  });
+
+  it('runFullPipeline downloads Binance in proxy mode without Chainlink when secondary signal is disabled', async () => {
+    const useCases = makePipelineUseCases();
+    vi.spyOn(useCases, 'discoverMarkets').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'downloadPolymarketTrades').mockResolvedValue(undefined);
+    const downloadBinanceSpy = vi.spyOn(useCases, 'downloadBinance').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'buildDataset').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'summarizeMarkets').mockResolvedValue(undefined);
+
+    await useCases.runFullPipeline({ ...baseOptions, allowProxyPrimaryPriceSourceForDebug: true, includeBinanceSecondarySignal: false });
+
+    expect(downloadBinanceSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('runFullPipeline does not download Binance when Chainlink input exists and secondary signal is disabled', async () => {
+    const useCases = makePipelineUseCases();
+    vi.spyOn(useCases, 'discoverMarkets').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'downloadPolymarketTrades').mockResolvedValue(undefined);
+    const downloadBinanceSpy = vi.spyOn(useCases, 'downloadBinance').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'buildDataset').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'summarizeMarkets').mockResolvedValue(undefined);
+
+    await useCases.runFullPipeline({ ...baseOptions, allowProxyPrimaryPriceSourceForDebug: true, includeBinanceSecondarySignal: false, chainlinkInputFile: './chainlink.jsonl' });
+
+    expect(downloadBinanceSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('dataset build with Chainlink input and proxy guardrails', () => {
   const options: CollectorOptions = {
     startDate: '2026-05-01',
@@ -268,18 +354,33 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
     allowProxyPrimaryPriceSourceForDebug: false,
   };
 
-  async function makeUseCases(dataDirectoryPath: string, chainlinkInputFile?: string): Promise<{ useCases: CollectorUseCases; fileStorage: FileStorage }> {
+  function makeMemoryLogger(): { logger: { info: (payload: Record<string, unknown>, message: string) => void; warn: () => void; error: () => void; debug: () => void }; infoEntries: Array<{ payload: Record<string, unknown>; message: string }> } {
+    const infoEntries: Array<{ payload: Record<string, unknown>; message: string }> = [];
+    return {
+      infoEntries,
+      logger: {
+        info: (payload: Record<string, unknown>, message: string) => infoEntries.push({ payload, message }),
+        warn: () => undefined,
+        error: () => undefined,
+        debug: () => undefined,
+      },
+    };
+  }
+
+  async function makeUseCases(dataDirectoryPath: string, chainlinkInputFile?: string): Promise<{ useCases: CollectorUseCases; fileStorage: FileStorage; infoEntries: Array<{ payload: Record<string, unknown>; message: string }> }> {
     const fileStorage = new FileStorage(dataDirectoryPath);
     await fileStorage.ensureDataDirectories();
+    const { logger, infoEntries } = makeMemoryLogger();
     return {
       fileStorage,
+      infoEntries,
       useCases: new CollectorUseCases(
         fileStorage,
         { writeRows: async () => undefined } as never,
         {} as never,
         {} as never,
         {} as never,
-        { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined } as never,
+        logger as never,
         chainlinkInputFile === undefined ? undefined : new ChainlinkLocalFilePriceSource(chainlinkInputFile),
       ),
     };
@@ -330,7 +431,68 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
       await useCases.buildDataset(proxyOptions);
       const rows = JSON.parse(await readFile(fileStorage.resolve(processedPricePointsDebugRelativeFilePath(proxyOptions)), 'utf8')) as NormalizedPricePoint[];
       expect(rows).toHaveLength(1);
+      expect(rows[0]?.chainlinkPrice).toBe(100_100);
       expect(rows.every((row) => row.dataQualityFlags.includes('proxy_primary_price_source_not_official'))).toBe(true);
+    } finally {
+      await rm(directoryPath, { recursive: true, force: true });
+    }
+  });
+
+
+  it('proxy debug mode without raw Binance files throws clear proxy-data-required error', async () => {
+    const directoryPath = await mkdtemp(join(tmpdir(), 'pm-proxy-missing-'));
+    try {
+      const { useCases, fileStorage } = await makeUseCases(directoryPath);
+      const proxyOptions = { ...options, allowProxyPrimaryPriceSourceForDebug: true };
+      await seedMarket(fileStorage, proxyOptions);
+      await expect(useCases.buildDataset(proxyOptions)).rejects.toThrow('Binance proxy primary data is required');
+    } finally {
+      await rm(directoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it('official Chainlink mode creates rows without proxy and Binance missing flags when Binance secondary is disabled', async () => {
+    const directoryPath = await mkdtemp(join(tmpdir(), 'pm-official-flags-'));
+    try {
+      const chainlinkPath = join(directoryPath, 'chainlink.jsonl');
+      await writeFile(chainlinkPath, '{"timestampMilliseconds":1,"price":100100}\n', 'utf8');
+      const { useCases, fileStorage } = await makeUseCases(directoryPath, chainlinkPath);
+      const seededOptions = { ...options, chainlinkInputFile: chainlinkPath, includeBinanceSecondarySignal: false };
+      await seedMarket(fileStorage, seededOptions);
+      await useCases.buildDataset(seededOptions);
+      const rows = JSON.parse(await readFile(fileStorage.resolve(processedPricePointsDebugRelativeFilePath(seededOptions)), 'utf8')) as NormalizedPricePoint[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.dataQualityFlags).not.toContain('proxy_primary_price_source_not_official');
+      expect(rows[0]?.dataQualityFlags).not.toContain('binance_secondary_signal_missing');
+    } finally {
+      await rm(directoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it('counts skipped rows missing a prior primary price without contaminating valid rows', async () => {
+    const directoryPath = await mkdtemp(join(tmpdir(), 'pm-skipped-primary-'));
+    try {
+      const chainlinkPath = join(directoryPath, 'chainlink.jsonl');
+      await writeFile(chainlinkPath, '{"timestampMilliseconds":1,"price":100100}\n', 'utf8');
+      const { useCases, fileStorage, infoEntries } = await makeUseCases(directoryPath, chainlinkPath);
+      const seededOptions = { ...options, chainlinkInputFile: chainlinkPath };
+      await fileStorage.writeJsonLines(acceptedMarketsRelativeFilePath(seededOptions), [alignmentMarket], true);
+      await fileStorage.writeJson(rawPriceHistoryRelativeFilePath(seededOptions, alignmentMarket.marketSlug, 'up'), [
+        { timestampMilliseconds: 500, price: 0.55 },
+        { timestampMilliseconds: 2_000, price: 0.6 },
+      ], true);
+      await fileStorage.writeJson(rawPriceHistoryRelativeFilePath(seededOptions, alignmentMarket.marketSlug, 'down'), [
+        { timestampMilliseconds: 500, price: 0.45 },
+        { timestampMilliseconds: 2_000, price: 0.4 },
+      ], true);
+      await useCases.buildDataset(seededOptions);
+      const rows = JSON.parse(await readFile(fileStorage.resolve(processedPricePointsDebugRelativeFilePath(seededOptions)), 'utf8')) as NormalizedPricePoint[];
+      expect(rows.map((row) => row.timestampMilliseconds)).toEqual([2_000]);
+      expect(rows[0]?.dataQualityFlags).not.toContain('primary_price_missing_before_timestamp');
+      expect(rows[0]?.dataQualityFlags).not.toContain('chainlink_price_missing_before_timestamp');
+      const buildLog = infoEntries.find((entry) => entry.message === 'Dataset build completed');
+      expect(buildLog?.payload['skippedRowsMissingPrimaryPriceBeforeTimestamp']).toBe(1);
+      expect(buildLog?.payload['missingChainlinkBeforeTimestampRows']).toBe(1);
     } finally {
       await rm(directoryPath, { recursive: true, force: true });
     }

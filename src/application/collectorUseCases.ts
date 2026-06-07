@@ -8,7 +8,7 @@ import type { BinanceArchiveApiAdapter, BinanceDataType, BinanceMarketType } fro
 import type { ExternalPriceSource } from '../adapters/externalPriceSource.js';
 import type { CollectorLogger } from '../adapters/logger.js';
 import type { ExternalPricePoint, NormalizedMarket, NormalizedPricePoint, PriceHistoryPoint, RejectedMarket } from '../core/domain.js';
-import { buildNormalizedPricePointsForMarket, buildPriceHistoryQualityFlags } from '../core/alignment.js';
+import { buildNormalizedPricePointsForMarketWithSkipCount, buildPriceHistoryQualityFlags } from '../core/alignment.js';
 import { buildMarketSummary } from '../core/summary.js';
 import { marketsParquetSchema, marketSummaryParquetSchema, pricePointsParquetSchema, rejectedMarketsParquetSchema } from './schemas.js';
 import { StateRepository } from './stateRepository.js';
@@ -148,25 +148,20 @@ export class CollectorUseCases {
     const primaryPricePoints = isProxyPrimaryPriceSourceForDebug ? binancePricePoints : chainlinkPricePoints;
     const allPricePoints: NormalizedPricePoint[] = [];
     const rejectedMarkets: RejectedMarket[] = [];
+    let skippedRowsMissingPrimaryPriceBeforeTimestamp = 0;
     let missingChainlinkBeforeTimestampRows = 0;
 
     for (const market of markets) {
       try {
         const upPriceHistory = await this.readPriceHistory(options, market.marketSlug, 'up');
         const downPriceHistory = await this.readPriceHistory(options, market.marketSlug, 'down');
-        const polymarketTimestamps = [...new Set([...upPriceHistory, ...downPriceHistory].map((pricePoint) => pricePoint.timestampMilliseconds))];
-        const hasMissingChainlinkBeforeTimestamp = polymarketTimestamps.some((timestampMilliseconds) =>
-          !primaryPricePoints.some((pricePoint) => pricePoint.timestampMilliseconds <= timestampMilliseconds),
-        );
-        if (hasMissingChainlinkBeforeTimestamp) missingChainlinkBeforeTimestampRows += 1;
         const dataQualityFlags = [
           ...market.dataQualityFlags,
-          ...(hasMissingChainlinkBeforeTimestamp ? ['chainlink_price_missing_before_timestamp'] : []),
           ...buildPriceHistoryQualityFlags('up', upPriceHistory, market, options.priceFidelityMinutes),
           ...buildPriceHistoryQualityFlags('down', downPriceHistory, market, options.priceFidelityMinutes),
           ...(isProxyPrimaryPriceSourceForDebug ? ['proxy_primary_price_source_not_official'] : []),
         ];
-        const pricePoints = buildNormalizedPricePointsForMarket({
+        const buildResult = buildNormalizedPricePointsForMarketWithSkipCount({
           market: { ...market, dataQualityFlags },
           upPriceHistory,
           downPriceHistory,
@@ -176,7 +171,9 @@ export class CollectorUseCases {
           isProxyPrimaryPriceSourceForDebug,
           requestedFidelityMinutes: options.priceFidelityMinutes,
         });
-        allPricePoints.push(...pricePoints);
+        skippedRowsMissingPrimaryPriceBeforeTimestamp += buildResult.skippedRowsMissingPrimaryPriceBeforeTimestamp;
+        missingChainlinkBeforeTimestampRows += isProxyPrimaryPriceSourceForDebug ? 0 : buildResult.skippedRowsMissingPrimaryPriceBeforeTimestamp;
+        allPricePoints.push(...buildResult.pricePoints);
       } catch (error) {
         rejectedMarkets.push({
           marketSlug: market.marketSlug,
@@ -195,7 +192,7 @@ export class CollectorUseCases {
       ? await this.fileStorage.readJsonLines<RejectedMarket>(rejectedMarketsRelativeFilePath(options))
       : [];
     await this.writeRejectedMarketsParquet(options, [...existingRejectedMarkets, ...rejectedMarkets]);
-    this.logger.info({ pricePointsBuilt: allPricePoints.length, additionalRejectedMarkets: rejectedMarkets.length, missingChainlinkBeforeTimestampRows }, 'Dataset build completed');
+    this.logger.info({ pricePointsBuilt: allPricePoints.length, additionalRejectedMarkets: rejectedMarkets.length, skippedRowsMissingPrimaryPriceBeforeTimestamp, missingChainlinkBeforeTimestampRows }, 'Dataset build completed');
   }
 
   public async summarizeMarkets(options: CollectorOptions): Promise<void> {
@@ -210,7 +207,7 @@ export class CollectorUseCases {
     await this.discoverMarkets(options);
     await this.downloadPolymarketPrices(options);
     await this.downloadPolymarketTrades(options);
-    if (options.includeBinanceSecondarySignal) await this.downloadBinance(options);
+    if (shouldDownloadBinanceDuringFullPipeline(options)) await this.downloadBinance(options);
     await this.buildDataset(options);
     await this.summarizeMarkets(options);
   }
@@ -274,6 +271,12 @@ export function enumerateDates(startDate: string, endDate: string): string[] {
     dates.push(new Date(timestampMilliseconds).toISOString().slice(0, 10));
   }
   return dates;
+}
+
+
+export function shouldDownloadBinanceDuringFullPipeline(options: Pick<CollectorOptions, 'includeBinanceSecondarySignal' | 'allowProxyPrimaryPriceSourceForDebug' | 'chainlinkInputFile'>): boolean {
+  // Proxy debug mode without Chainlink needs Binance raw files because Binance becomes the non-official primary proxy source.
+  return options.includeBinanceSecondarySignal || (options.allowProxyPrimaryPriceSourceForDebug && options.chainlinkInputFile === undefined);
 }
 
 export function dateRangeStateKey(options: Pick<CollectorOptions, 'startDate' | 'endDate'>): string { return `${options.startDate}_${options.endDate}`; }

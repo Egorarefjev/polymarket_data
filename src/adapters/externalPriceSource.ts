@@ -143,6 +143,9 @@ function pickFirstDefined(row: Record<string, unknown>, fieldNames: string[]): u
   return undefined;
 }
 
+// Reserved for a future direct source mode. Current dataset builds intentionally read
+// previously downloaded raw Binance files from FileStorage for reproducibility instead
+// of calling this source during buildDataset.
 export class BinanceBtcUsdtPriceSource implements ExternalPriceSource {
   public readonly sourceName = 'binance';
 
