@@ -6,13 +6,17 @@ export interface BuildNormalizedPricePointsForMarketResult {
   skippedRowsMissingPrimaryPriceBeforeTimestamp: number;
 }
 
-interface BuildNormalizedPricePointsForMarketParameters {
+export interface BuildNormalizedPricePointsForMarketParameters {
   market: NormalizedMarket;
   upPriceHistory: PriceHistoryPoint[];
   downPriceHistory: PriceHistoryPoint[];
+  /** Must be sorted ascending by timestampMilliseconds when no lookup is provided. */
   primaryExternalPricePoints: ExternalPricePoint[];
+  primaryPriceLookup?: CausalAsOfPriceLookup;
   primaryPriceSourceName?: PrimaryPriceSourceName;
+  /** Must be sorted ascending by timestampMilliseconds when no lookup is provided. */
   binanceSecondaryPricePoints?: ExternalPricePoint[];
+  binanceSecondaryPriceLookup?: CausalAsOfPriceLookup;
   isBinanceSecondarySignalEnabled: boolean;
   isProxyPrimaryPriceSourceForDebug?: boolean;
   requestedFidelityMinutes: number;
@@ -43,19 +47,15 @@ export function buildNormalizedPricePointsForMarketWithSkipCount(parameters: Bui
   const allTimestamps = [...new Set([...upPriceByTimestamp.keys(), ...downPriceByTimestamp.keys()])].sort(
     (leftTimestamp, rightTimestamp) => leftTimestamp - rightTimestamp,
   );
-  const orderedPrimaryPricePoints = [...primaryExternalPricePoints].sort(
-    (leftPricePoint, rightPricePoint) => leftPricePoint.timestampMilliseconds - rightPricePoint.timestampMilliseconds,
-  );
-  const orderedBinancePricePoints = [...binanceSecondaryPricePoints].sort(
-    (leftPricePoint, rightPricePoint) => leftPricePoint.timestampMilliseconds - rightPricePoint.timestampMilliseconds,
-  );
+  const primaryPriceLookup = parameters.primaryPriceLookup ?? new CausalAsOfPriceLookup(primaryExternalPricePoints);
+  const binanceSecondaryPriceLookup = parameters.binanceSecondaryPriceLookup ?? new CausalAsOfPriceLookup(binanceSecondaryPricePoints);
   const isOfficialChainlinkMode = primaryPriceSourceName === 'chainlink';
   const baseQualityFlags = mergeUniqueFlags([
     ...market.dataQualityFlags,
     ...buildPriceHistoryQualityFlags('up', upPriceHistory, market, requestedFidelityMinutes),
     ...buildPriceHistoryQualityFlags('down', downPriceHistory, market, requestedFidelityMinutes),
-    ...(isOfficialChainlinkMode && orderedPrimaryPricePoints.length === 0 ? ['chainlink_data_unavailable'] : []),
-    ...(isOfficialChainlinkMode && isExternalHistoryTooSparse(orderedPrimaryPricePoints, requestedFidelityMinutes) ? ['chainlink_history_too_sparse'] : []),
+    ...(isOfficialChainlinkMode && primaryExternalPricePoints.length === 0 ? ['chainlink_data_unavailable'] : []),
+    ...(isOfficialChainlinkMode && isExternalHistoryTooSparse(primaryExternalPricePoints, requestedFidelityMinutes) ? ['chainlink_history_too_sparse'] : []),
     ...(isProxyPrimaryPriceSourceForDebug ? ['proxy_primary_price_source_not_official'] : []),
   ]);
 
@@ -63,7 +63,7 @@ export function buildNormalizedPricePointsForMarketWithSkipCount(parameters: Bui
   const pricePointsWithoutFutureLabels = allTimestamps.flatMap((timestampMilliseconds) => {
     // Causal as-of join: for each Polymarket price timestamp, use only the latest
     // primary price point at or before that timestamp. Never use future prices.
-    const primaryPricePoint = findLatestExternalPricePointAtOrBeforeTimestamp(orderedPrimaryPricePoints, timestampMilliseconds);
+    const primaryPricePoint = primaryPriceLookup.findLatestAtOrBefore(timestampMilliseconds);
     if (primaryPricePoint === null) {
       skippedRowsMissingPrimaryPriceBeforeTimestamp += 1;
       return [];
@@ -74,7 +74,7 @@ export function buildNormalizedPricePointsForMarketWithSkipCount(parameters: Bui
     if (!upPriceByTimestamp.has(timestampMilliseconds)) dataQualityFlags.push('price_history_missing_up');
     if (!downPriceByTimestamp.has(timestampMilliseconds)) dataQualityFlags.push('price_history_missing_down');
 
-    const binancePricePoint = findLatestExternalPricePointAtOrBeforeTimestamp(orderedBinancePricePoints, timestampMilliseconds);
+    const binancePricePoint = binanceSecondaryPriceLookup.findLatestAtOrBefore(timestampMilliseconds);
     const binanceDistanceToTarget = binancePricePoint === null ? null : calculateDistanceToTarget(binancePricePoint.price, market.targetPrice ?? 0);
     if (isBinanceSecondarySignalEnabled && binancePricePoint === null) dataQualityFlags.push('binance_secondary_signal_missing');
     const chainlinkDistanceBasisPoints = isOfficialChainlinkMode ? primaryDistanceToTarget.distanceBasisPoints : null;
@@ -148,15 +148,46 @@ export function addFutureLabels<T extends Omit<NormalizedPricePoint, keyof Futur
   });
 }
 
-export function findLatestExternalPricePointAtOrBeforeTimestamp(pricePoints: ExternalPricePoint[], timestampMilliseconds: number): ExternalPricePoint | null {
-  let latestPricePoint: ExternalPricePoint | null = null;
-  for (const pricePoint of pricePoints) {
-    if (pricePoint.timestampMilliseconds > timestampMilliseconds) break;
-    latestPricePoint = pricePoint;
+/**
+ * Binary-search causal as-of lookup over an array sorted ascending by timestampMilliseconds.
+ * The input array is retained by reference and never mutated.
+ */
+export class CausalAsOfPriceLookup {
+  public constructor(private readonly sortedPricePoints: ExternalPricePoint[]) {}
+
+  public findLatestAtOrBefore(timestampMilliseconds: number): ExternalPricePoint | null {
+    let lowIndex = 0;
+    let highIndex = this.sortedPricePoints.length - 1;
+    let latestMatchingIndex = -1;
+
+    while (lowIndex <= highIndex) {
+      const middleIndex = lowIndex + Math.floor((highIndex - lowIndex) / 2);
+      const middleTimestampMilliseconds = this.sortedPricePoints[middleIndex]?.timestampMilliseconds ?? Number.POSITIVE_INFINITY;
+      if (middleTimestampMilliseconds <= timestampMilliseconds) {
+        latestMatchingIndex = middleIndex;
+        lowIndex = middleIndex + 1;
+      } else {
+        highIndex = middleIndex - 1;
+      }
+    }
+
+    return latestMatchingIndex === -1 ? null : this.sortedPricePoints[latestMatchingIndex] ?? null;
   }
-  return latestPricePoint;
 }
 
+export function sortExternalPricePointsOnce(pricePoints: ExternalPricePoint[]): ExternalPricePoint[] {
+  return [...pricePoints].sort((leftPricePoint, rightPricePoint) => leftPricePoint.timestampMilliseconds - rightPricePoint.timestampMilliseconds);
+}
+
+/**
+ * Causal as-of lookup. Input must be sorted ascending by timestampMilliseconds.
+ * Uses binary search and never returns a point after timestampMilliseconds.
+ */
+export function findLatestExternalPricePointAtOrBeforeTimestamp(pricePoints: ExternalPricePoint[], timestampMilliseconds: number): ExternalPricePoint | null {
+  return new CausalAsOfPriceLookup(pricePoints).findLatestAtOrBefore(timestampMilliseconds);
+}
+
+/** Input must be sorted ascending by timestampMilliseconds. */
 export function findLatestBinancePricePointAtOrBeforeTimestamp(pricePoints: ExternalPricePoint[], timestampMilliseconds: number): ExternalPricePoint | null {
   return findLatestExternalPricePointAtOrBeforeTimestamp(pricePoints, timestampMilliseconds);
 }
