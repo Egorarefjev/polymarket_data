@@ -8,31 +8,20 @@ The collector downloads public data and normalizes it into analysis tables:
 
 - `data/processed/markets_<start>_<end>.parquet`
 - `data/processed/price_points_<start>_<end>.parquet`
+- `data/processed/strategy_training_rows_<start>_<end>.parquet`
 - `data/processed/market_summary_<start>_<end>.parquet`
 - `data/processed/rejected_markets_<start>_<end>.parquet`
 
-It also saves raw public responses for reproducibility:
-
-```text
-data/
-  raw/
-    gamma/
-    polymarket-prices/
-    polymarket-trades/
-    binance/
-  processed/
-  rejected/
-  state/
-  logs/
-```
+It also writes debug JSON mirrors for the trajectory and strategy rows so tests and local inspections do not need to decode Parquet.
 
 The normalized dataset is meant to answer questions such as:
 
+- how the Polymarket UP/DOWN price moved inside each 5-minute market;
 - what Chainlink BTC/USD distance to target produced what UP/DOWN probability price;
 - how probability price changes with `seconds_left`;
-- how often price reached 0.75, 0.80, 0.90, 0.95, or 0.99;
+- when price reached 0.75, 0.80, 0.90, 0.95, or 0.99;
 - which side won;
-- where Polymarket may have overestimated or underestimated probabilities.
+- whether price trajectory can be used later for ML labels and backtesting.
 
 ## 2. What the project does NOT do
 
@@ -48,7 +37,9 @@ npm run build
 npm run test
 ```
 
-## 4. Download data for 1 day
+## 4. Official mode command with Chainlink input
+
+Official analytical mode requires a non-empty Chainlink input file. Empty or header-only Chainlink input is fatal, and the collector refuses to silently fallback from a provided Chainlink file to Binance.
 
 ```bash
 npm run collector -- all \
@@ -63,40 +54,48 @@ npm run collector -- all \
 
 The `end-date` is exclusive, so the example covers exactly `2026-05-01T00:00:00Z` through `2026-05-02T00:00:00Z`.
 
-## 5. Download data for 7 days
+## 5. Proxy debug command without Chainlink
+
+Proxy debug mode works only when `--chainlink-input-file` is **not** passed. It uses Binance as a non-official primary proxy source solely to verify the pipeline. Every row is flagged `proxy_primary_price_source_not_official`. Do not use Binance-only proxy mode for real strategy conclusions or production analytics.
 
 ```bash
 npm run collector -- all \
   --start-date 2026-05-01 \
-  --end-date 2026-05-08 \
+  --end-date 2026-05-02 \
   --symbol BTCUSDT \
   --price-fidelity-minutes 1 \
-  --primary-price-source chainlink \
-  --chainlink-input-file ./chainlink_btc_usd_2026-05-01_2026-05-08.csv \
-  --include-binance-secondary-signal true \
-  --maximum-concurrent-requests 4 \
-  --request-delay-milliseconds 200
+  --allow-proxy-primary-price-source-for-debug true \
+  --include-binance-secondary-signal false
 ```
 
-You can run individual stages if you want finer control:
+When `all` runs in proxy debug mode without Chainlink, it downloads the required raw Binance files automatically because Binance becomes the non-official primary proxy source. If you run manual stages, run `download-binance` before `build-dataset`.
 
-```bash
-npm run collector -- discover --start-date 2026-05-01 --end-date 2026-05-08
-npm run collector -- download-polymarket-prices --start-date 2026-05-01 --end-date 2026-05-08 --price-fidelity-minutes 1
-npm run collector -- download-binance --start-date 2026-05-01 --end-date 2026-05-08 --symbol BTCUSDT --binance-data-type aggTrades
-npm run collector -- build-dataset --start-date 2026-05-01 --end-date 2026-05-08 --chainlink-input-file ./chainlink_btc_usd_2026-05-01_2026-05-08.csv
-npm run collector -- summarize --start-date 2026-05-01 --end-date 2026-05-08
-```
+## 6. Price-source semantics
 
-## 6. Why full historical orderbook is not downloaded for free
+Polymarket BTC Up/Down 5-minute market rules resolve using Chainlink BTC/USD Data Streams. For real analytical conclusions and strategy research, use official Chainlink mode only.
 
-The collector intentionally uses public Gamma, public CLOB `prices-history`, and public Binance archives as an optional secondary signal. A full historical orderbook replay requires historical order-level depth snapshots and updates, which are not equivalent to public price history and may not be freely exposed as a complete archive. The collector does not use authenticated or trading endpoints to obtain private order data.
+Official Chainlink mode:
 
-## 7. Price sources, Chainlink input, and price-history fidelity
+- selected by passing `--chainlink-input-file`;
+- the file must contain at least one valid Chainlink price point after parsing;
+- `primary_price_source_name = "chainlink"`;
+- `primary_*` fields are Chainlink values;
+- `chainlink_*` fields are Chainlink values;
+- Binance may be included only as an optional secondary signal.
 
-Polymarket BTC Up/Down 5-minute market rules resolve using the Chainlink BTC/USD Data Stream. Therefore Chainlink is the collector's primary analytical price source for target/start price validation, current and final target distance, winner validation, and all main `chainlink_distance_basis_points` fields.
+Proxy debug mode:
 
-Chainlink Data Streams REST API historical reports require authenticated access, so this collector supports a local Chainlink historical input file instead of attempting unauthenticated public history downloads. Official dataset builds require `--chainlink-input-file <path>`. The supported local formats are:
+- selected only when no `--chainlink-input-file` is passed and `--allow-proxy-primary-price-source-for-debug true` is passed;
+- `primary_price_source_name = "binance_proxy"`;
+- `primary_*` fields are filled from Binance proxy data;
+- `chainlink_*` fields stay `null` and are never polluted by Binance proxy values;
+- every row has `proxy_primary_price_source_not_official`.
+
+No Chainlink and no proxy debug mode makes `build-dataset` fail with a clear Chainlink-required error.
+
+## 7. Chainlink input file formats
+
+Chainlink Data Streams REST API historical reports require authenticated access, so this collector supports a local Chainlink historical input file instead of attempting unauthenticated public history downloads. Supported formats are CSV, JSON, and JSONL.
 
 CSV:
 
@@ -115,40 +114,66 @@ Accepted CSV timestamp aliases are `timestamp`, `timestamp_ms`, `timestampMillis
 
 Timestamps may be seconds, milliseconds, or microseconds; they are normalized to milliseconds. Prices must be finite positive numbers. Input rows are sorted ascending and duplicate timestamps keep the last record.
 
-Binance BTCUSDT is only an optional secondary predictive signal. If `--include-binance-secondary-signal false` is used, Binance columns are null and rows should not receive `binance_secondary_signal_missing` because the signal was intentionally disabled.
+## 8. Price trajectory and summaries
 
-A Binance-only proxy mode exists only for pipeline debugging. This mode must not be used for real outcome/distance analytics or official strategy conclusions. It fills the `chainlink_*` fields from Binance only to test the pipeline, and every row is flagged `proxy_primary_price_source_not_official`. By default this mode is disabled; without `--chainlink-input-file`, `build-dataset` fails with a clear error unless proxy debug mode is explicitly enabled and raw Binance files are available.
+`price_points.parquet` is the primary analytical dataset. It stores the full available Polymarket prices-history trajectory for every market: if a market has 5 points, all 5 points are stored; if it has 20 points, all 20 points are stored. The collector does not keep only threshold hits, maxima/minima, first threshold hits, or any other reduced subset.
 
-Proxy mode has two valid workflows.
+`market_summary.parquet` is a derived aggregate summary over the full trajectory. Threshold fields are useful summary features, but they do not replace the full history.
 
-A) Full pipeline proxy debug. After the collector fix, `all` downloads the required raw Binance files automatically when proxy debug mode is enabled and no Chainlink input file is provided:
+Polymarket CLOB `prices-history` can be coarse in time, commonly 1-minute granularity even for 5-minute markets. If you need tick-level or per-second movement, you need a live WebSocket logger or a paid historical provider. Public price-history is not a full historical orderbook replay.
 
-```bash
-npm run collector -- all \
-  --start-date 2026-05-01 \
-  --end-date 2026-05-02 \
-  --price-fidelity-minutes 1 \
-  --allow-proxy-primary-price-source-for-debug true \
-  --include-binance-secondary-signal false
-```
+## 9. `price_points.parquet` fields
 
-B) Manual stage proxy debug. If you run individual stages, `build-dataset` expects the raw Binance files to already exist, so run `download-binance` before `build-dataset`:
+Important columns include:
 
-```bash
-npm run collector -- discover --start-date 2026-05-01 --end-date 2026-05-02
-npm run collector -- download-polymarket-prices --start-date 2026-05-01 --end-date 2026-05-02 --price-fidelity-minutes 1
-npm run collector -- download-binance --start-date 2026-05-01 --end-date 2026-05-02 --symbol BTCUSDT --binance-data-type aggTrades
-npm run collector -- build-dataset --start-date 2026-05-01 --end-date 2026-05-02 --allow-proxy-primary-price-source-for-debug true --include-binance-secondary-signal false
-npm run collector -- summarize --start-date 2026-05-01 --end-date 2026-05-02
-```
+- market identity/time: `market_slug`, `condition_id`, `timestamp_milliseconds`, `seconds_left`, `target_price`;
+- Polymarket trajectory: `up_price`, `down_price`;
+- primary source: `primary_price_source_name`, `primary_price`, `primary_timestamp_milliseconds`, `primary_distance_usd`, `primary_distance_basis_points`;
+- official Chainlink fields: `chainlink_price`, `chainlink_timestamp_milliseconds`, `chainlink_distance_usd`, `chainlink_distance_basis_points`;
+- optional Binance secondary fields: `binance_price`, `binance_timestamp_milliseconds`, `binance_distance_usd`, `binance_distance_basis_points`, `binance_minus_chainlink_basis_points`;
+- outcome/quality: `winner`, `is_resolved`, `data_quality_flags`;
+- future labels: `future_maximum_up_price`, `future_maximum_down_price`, `future_minimum_up_price`, `future_minimum_down_price`, `future_final_up_price`, `future_final_down_price`, all `future_seconds_until_*` threshold labels, and all `future_reaches_*` boolean labels.
 
-Polymarket CLOB `prices-history` `fidelity` is expressed in **minutes, not seconds**. Use `--price-fidelity-minutes`; values below `1` are rejected because the public API accepts minute buckets. Polymarket prices-history fidelity is in minutes, not seconds. The documented default is 1 minute. Public `prices-history` can still be too coarse for closed 5-minute markets, so rows with too few or coarse price points must not be trusted for threshold timing analysis.
+Future labels are calculated only inside the same market and never look into the next market. `future_*` fields are labels/targets for training and backtesting; they must not be used as model features.
 
-## 8. Price-history vs orderbook
+## 10. `market_summary.parquet` fields
 
-`prices-history` is a historical price series for a token. It is useful for probability-over-time analysis but does not contain all bid/ask levels, queue depth, or every orderbook mutation. An orderbook archive would include liquidity at price levels and order updates. This project uses price-history because it is public and sufficient for the requested probability-distance-time dataset.
+The summary keeps first threshold timestamp fields for UP and DOWN at 0.75, 0.80, 0.90, 0.95, and 0.99. It also includes trajectory aggregates:
 
-## 9. Data quality flags
+- `up_price_open`, `down_price_open`, `up_price_close`, `down_price_close`;
+- `up_price_minimum`, `up_price_maximum`, `down_price_minimum`, `down_price_maximum`;
+- `up_price_range`, `down_price_range`;
+- `up_price_last`, `down_price_last`;
+- `up_price_mean`, `down_price_mean`;
+- `up_price_median`, `down_price_median`;
+- `up_price_standard_deviation`, `down_price_standard_deviation`;
+- `up_price_number_of_observations`, `down_price_number_of_observations`, `price_points_count`.
+
+It also records `primary_price_source_name`, `close_primary_price`, and `final_primary_distance_basis_points`. In proxy debug mode, `close_primary_price` is filled from Binance proxy while `close_chainlink_price` remains `null`.
+
+## 11. `strategy_training_rows.parquet` fields and leakage rules
+
+`strategy_training_rows.parquet` is built from `price_points.parquet` and keeps features and labels separated.
+
+Feature columns:
+
+- `market_slug`, `condition_id`, `timestamp_milliseconds`, `seconds_left`, `target_price`;
+- `up_price`, `down_price`;
+- `primary_price_source_name`, `primary_price`, `primary_timestamp_milliseconds`, `primary_distance_usd`, `primary_distance_basis_points`;
+- optional Binance fields: `binance_price`, `binance_timestamp_milliseconds`, `binance_distance_usd`, `binance_distance_basis_points`, `binance_minus_chainlink_basis_points`;
+- past-only features: `up_price_change_previous_1_point`, `down_price_change_previous_1_point`, `up_price_change_previous_2_points`, `down_price_change_previous_2_points`, `up_price_change_previous_3_points`, `down_price_change_previous_3_points`.
+
+Label columns:
+
+- `winner`, `up_wins_binary`;
+- `future_maximum_up_price`, `future_maximum_down_price`, `future_minimum_up_price`, `future_minimum_down_price`, `future_final_up_price`, `future_final_down_price`;
+- `future_seconds_until_up_price_greater_than_or_equal_090`, `future_seconds_until_down_price_greater_than_or_equal_090`;
+- `future_reaches_up_090`, `future_reaches_up_095`, `future_reaches_up_099`, `future_reaches_down_090`, `future_reaches_down_095`, `future_reaches_down_099`;
+- `data_quality_flags` for filtering.
+
+Do not use `future_*`, `winner`, close prices, future price movement, or future threshold hits as features. Previous price change features use only previous points inside the same market; first rows with insufficient history have null previous-change fields.
+
+## 12. Data quality flags
 
 Possible flags include:
 
@@ -163,7 +188,7 @@ Possible flags include:
 - `price_history_does_not_cover_market_end`
 - `price_history_missing_up`
 - `price_history_missing_down`
-- `primary_price_missing_before_timestamp` (row is skipped; counted in logs, not attached to valid rows)
+- `primary_price_missing_before_timestamp` (diagnostic name; rows are skipped and the aggregate counter is logged, not attached to valid rows)
 - `chainlink_data_unavailable`
 - `chainlink_history_too_sparse`
 - `binance_secondary_signal_missing`
@@ -174,7 +199,7 @@ Possible flags include:
 
 Bad or suspicious market-level data is written to rejected outputs instead of crashing the full pipeline.
 
-## 10. Reading output Parquet
+## 13. Reading output Parquet
 
 Python example:
 
@@ -188,12 +213,12 @@ print(price_points.head())
 DuckDB example:
 
 ```sql
-SELECT market_slug, seconds_left, chainlink_distance_basis_points, binance_distance_basis_points, up_price, down_price
+SELECT market_slug, seconds_left, primary_distance_basis_points, up_price, down_price
 FROM 'data/processed/price_points_2026-05-01_2026-05-02.parquet'
 LIMIT 10;
 ```
 
-## 11. Scaling from 1 day to month/year
+## 14. Scaling from 1 day to month/year
 
 Start with one day and inspect `rejected_markets` and `data_quality_flags`. Then increase the range gradually:
 

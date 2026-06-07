@@ -1,4 +1,4 @@
-import type { ExternalPricePoint, NormalizedMarket, NormalizedPricePoint, PriceHistoryPoint } from './domain.js';
+import type { ExternalPricePoint, FuturePriceLabels, NormalizedMarket, NormalizedPricePoint, PriceHistoryPoint, PriceHistoryQualityMetrics, PrimaryPriceSourceName } from './domain.js';
 import { calculateDistanceToTarget, calculateSecondsLeft } from './calculations.js';
 
 export interface BuildNormalizedPricePointsForMarketResult {
@@ -11,18 +11,31 @@ interface BuildNormalizedPricePointsForMarketParameters {
   upPriceHistory: PriceHistoryPoint[];
   downPriceHistory: PriceHistoryPoint[];
   primaryExternalPricePoints: ExternalPricePoint[];
+  primaryPriceSourceName?: PrimaryPriceSourceName;
   binanceSecondaryPricePoints?: ExternalPricePoint[];
   isBinanceSecondarySignalEnabled: boolean;
   isProxyPrimaryPriceSourceForDebug?: boolean;
   requestedFidelityMinutes: number;
 }
 
+const futureThresholds = [0.75, 0.8, 0.9, 0.95, 0.99] as const;
+
 export function buildNormalizedPricePointsForMarket(parameters: BuildNormalizedPricePointsForMarketParameters): NormalizedPricePoint[] {
   return buildNormalizedPricePointsForMarketWithSkipCount(parameters).pricePoints;
 }
 
 export function buildNormalizedPricePointsForMarketWithSkipCount(parameters: BuildNormalizedPricePointsForMarketParameters): BuildNormalizedPricePointsForMarketResult {
-  const { market, upPriceHistory, downPriceHistory, primaryExternalPricePoints, binanceSecondaryPricePoints = [], isBinanceSecondarySignalEnabled, isProxyPrimaryPriceSourceForDebug = false, requestedFidelityMinutes } = parameters;
+  const {
+    market,
+    upPriceHistory,
+    downPriceHistory,
+    primaryExternalPricePoints,
+    primaryPriceSourceName = parameters.isProxyPrimaryPriceSourceForDebug ? 'binance_proxy' : 'chainlink',
+    binanceSecondaryPricePoints = [],
+    isBinanceSecondarySignalEnabled,
+    isProxyPrimaryPriceSourceForDebug = false,
+    requestedFidelityMinutes,
+  } = parameters;
   if (market.targetPrice === null) return { pricePoints: [], skippedRowsMissingPrimaryPriceBeforeTimestamp: 0 };
 
   const upPriceByTimestamp = new Map(upPriceHistory.map((pricePoint) => [pricePoint.timestampMilliseconds, pricePoint.price]));
@@ -36,26 +49,27 @@ export function buildNormalizedPricePointsForMarketWithSkipCount(parameters: Bui
   const orderedBinancePricePoints = [...binanceSecondaryPricePoints].sort(
     (leftPricePoint, rightPricePoint) => leftPricePoint.timestampMilliseconds - rightPricePoint.timestampMilliseconds,
   );
+  const isOfficialChainlinkMode = primaryPriceSourceName === 'chainlink';
   const baseQualityFlags = mergeUniqueFlags([
     ...market.dataQualityFlags,
     ...buildPriceHistoryQualityFlags('up', upPriceHistory, market, requestedFidelityMinutes),
     ...buildPriceHistoryQualityFlags('down', downPriceHistory, market, requestedFidelityMinutes),
-    ...(orderedPrimaryPricePoints.length === 0 ? ['chainlink_data_unavailable'] : []),
-    ...(isExternalHistoryTooSparse(orderedPrimaryPricePoints, requestedFidelityMinutes) ? ['chainlink_history_too_sparse'] : []),
+    ...(isOfficialChainlinkMode && orderedPrimaryPricePoints.length === 0 ? ['chainlink_data_unavailable'] : []),
+    ...(isOfficialChainlinkMode && isExternalHistoryTooSparse(orderedPrimaryPricePoints, requestedFidelityMinutes) ? ['chainlink_history_too_sparse'] : []),
     ...(isProxyPrimaryPriceSourceForDebug ? ['proxy_primary_price_source_not_official'] : []),
   ]);
 
   let skippedRowsMissingPrimaryPriceBeforeTimestamp = 0;
-  const pricePoints = allTimestamps.flatMap((timestampMilliseconds) => {
+  const pricePointsWithoutFutureLabels = allTimestamps.flatMap((timestampMilliseconds) => {
     // Causal as-of join: for each Polymarket price timestamp, use only the latest
     // primary price point at or before that timestamp. Never use future prices.
-    const chainlinkPricePoint = findLatestExternalPricePointAtOrBeforeTimestamp(orderedPrimaryPricePoints, timestampMilliseconds);
-    if (chainlinkPricePoint === null) {
+    const primaryPricePoint = findLatestExternalPricePointAtOrBeforeTimestamp(orderedPrimaryPricePoints, timestampMilliseconds);
+    if (primaryPricePoint === null) {
       skippedRowsMissingPrimaryPriceBeforeTimestamp += 1;
       return [];
     }
 
-    const chainlinkDistanceToTarget = calculateDistanceToTarget(chainlinkPricePoint.price, market.targetPrice ?? 0);
+    const primaryDistanceToTarget = calculateDistanceToTarget(primaryPricePoint.price, market.targetPrice ?? 0);
     const dataQualityFlags = [...baseQualityFlags];
     if (!upPriceByTimestamp.has(timestampMilliseconds)) dataQualityFlags.push('price_history_missing_up');
     if (!downPriceByTimestamp.has(timestampMilliseconds)) dataQualityFlags.push('price_history_missing_down');
@@ -63,9 +77,10 @@ export function buildNormalizedPricePointsForMarketWithSkipCount(parameters: Bui
     const binancePricePoint = findLatestExternalPricePointAtOrBeforeTimestamp(orderedBinancePricePoints, timestampMilliseconds);
     const binanceDistanceToTarget = binancePricePoint === null ? null : calculateDistanceToTarget(binancePricePoint.price, market.targetPrice ?? 0);
     if (isBinanceSecondarySignalEnabled && binancePricePoint === null) dataQualityFlags.push('binance_secondary_signal_missing');
-    const binanceMinusChainlinkBasisPoints = binanceDistanceToTarget === null
+    const chainlinkDistanceBasisPoints = isOfficialChainlinkMode ? primaryDistanceToTarget.distanceBasisPoints : null;
+    const binanceMinusChainlinkBasisPoints = binanceDistanceToTarget === null || chainlinkDistanceBasisPoints === null
       ? null
-      : binanceDistanceToTarget.distanceBasisPoints - chainlinkDistanceToTarget.distanceBasisPoints;
+      : binanceDistanceToTarget.distanceBasisPoints - chainlinkDistanceBasisPoints;
     if (binanceMinusChainlinkBasisPoints !== null && Math.abs(binanceMinusChainlinkBasisPoints) > 10) {
       dataQualityFlags.push('binance_chainlink_divergence_high');
     }
@@ -77,17 +92,22 @@ export function buildNormalizedPricePointsForMarketWithSkipCount(parameters: Bui
         timestampMilliseconds,
         secondsLeft: calculateSecondsLeft(market.marketEndTimestampMilliseconds, timestampMilliseconds),
         targetPrice: market.targetPrice ?? 0,
-        chainlinkPrice: chainlinkPricePoint.price,
-        chainlinkTimestampMilliseconds: chainlinkPricePoint.timestampMilliseconds,
-        chainlinkDistanceUsd: chainlinkDistanceToTarget.distanceUsd,
-        chainlinkDistanceBasisPoints: chainlinkDistanceToTarget.distanceBasisPoints,
+        upPrice: upPriceByTimestamp.get(timestampMilliseconds) ?? null,
+        downPrice: downPriceByTimestamp.get(timestampMilliseconds) ?? null,
+        primaryPriceSourceName,
+        primaryPrice: primaryPricePoint.price,
+        primaryTimestampMilliseconds: primaryPricePoint.timestampMilliseconds,
+        primaryDistanceUsd: primaryDistanceToTarget.distanceUsd,
+        primaryDistanceBasisPoints: primaryDistanceToTarget.distanceBasisPoints,
+        chainlinkPrice: isOfficialChainlinkMode ? primaryPricePoint.price : null,
+        chainlinkTimestampMilliseconds: isOfficialChainlinkMode ? primaryPricePoint.timestampMilliseconds : null,
+        chainlinkDistanceUsd: isOfficialChainlinkMode ? primaryDistanceToTarget.distanceUsd : null,
+        chainlinkDistanceBasisPoints,
         binancePrice: binancePricePoint?.price ?? null,
         binanceTimestampMilliseconds: binancePricePoint?.timestampMilliseconds ?? null,
         binanceDistanceUsd: binanceDistanceToTarget?.distanceUsd ?? null,
         binanceDistanceBasisPoints: binanceDistanceToTarget?.distanceBasisPoints ?? null,
         binanceMinusChainlinkBasisPoints,
-        upPrice: upPriceByTimestamp.get(timestampMilliseconds) ?? null,
-        downPrice: downPriceByTimestamp.get(timestampMilliseconds) ?? null,
         winner: market.winner,
         isResolved: market.isResolved,
         dataQualityFlags: mergeUniqueFlags(dataQualityFlags),
@@ -95,39 +115,53 @@ export function buildNormalizedPricePointsForMarketWithSkipCount(parameters: Bui
     ];
   });
 
-  return { pricePoints, skippedRowsMissingPrimaryPriceBeforeTimestamp };
+  return { pricePoints: addFutureLabels(pricePointsWithoutFutureLabels), skippedRowsMissingPrimaryPriceBeforeTimestamp };
 }
 
-export function findLatestExternalPricePointAtOrBeforeTimestamp<T extends { timestampMilliseconds: number }>(
-  pricePoints: T[],
-  timestampMilliseconds: number,
-): T | null {
-  if (pricePoints.length === 0) return null;
-  let leftIndex = 0;
-  let rightIndex = pricePoints.length - 1;
-  let bestMatch: T | null = null;
-  while (leftIndex <= rightIndex) {
-    const middleIndex = Math.floor((leftIndex + rightIndex) / 2);
-    const middlePricePoint = pricePoints[middleIndex];
-    if (middlePricePoint === undefined) return bestMatch;
-    if (middlePricePoint.timestampMilliseconds <= timestampMilliseconds) {
-      bestMatch = middlePricePoint;
-      leftIndex = middleIndex + 1;
-    } else {
-      rightIndex = middleIndex - 1;
-    }
+export function addFutureLabels<T extends Omit<NormalizedPricePoint, keyof FuturePriceLabels>>(pricePoints: T[]): NormalizedPricePoint[] {
+  const orderedPricePoints = [...pricePoints].sort((left, right) => left.timestampMilliseconds - right.timestampMilliseconds);
+  return orderedPricePoints.map((pricePoint, index) => {
+    const futureSlice = orderedPricePoints.slice(index);
+    const futureUpPrices = futureSlice.map((point) => point.upPrice).filter((price): price is number => price !== null);
+    const futureDownPrices = futureSlice.map((point) => point.downPrice).filter((price): price is number => price !== null);
+    const labels = Object.fromEntries(futureThresholds.flatMap((threshold) => {
+      const suffix = thresholdSuffix(threshold);
+      const upHit = futureSlice.find((point) => (point.upPrice ?? -Infinity) >= threshold) ?? null;
+      const downHit = futureSlice.find((point) => (point.downPrice ?? -Infinity) >= threshold) ?? null;
+      return [
+        [`futureSecondsUntilUpPriceGreaterThanOrEqual${suffix}`, upHit === null ? null : Math.max(0, (upHit.timestampMilliseconds - pricePoint.timestampMilliseconds) / 1_000)],
+        [`futureSecondsUntilDownPriceGreaterThanOrEqual${suffix}`, downHit === null ? null : Math.max(0, (downHit.timestampMilliseconds - pricePoint.timestampMilliseconds) / 1_000)],
+        [`futureReachesUp${suffix}`, upHit !== null],
+        [`futureReachesDown${suffix}`, downHit !== null],
+      ];
+    }));
+    return {
+      ...pricePoint,
+      futureMaximumUpPrice: futureUpPrices.length === 0 ? null : Math.max(...futureUpPrices),
+      futureMaximumDownPrice: futureDownPrices.length === 0 ? null : Math.max(...futureDownPrices),
+      futureMinimumUpPrice: futureUpPrices.length === 0 ? null : Math.min(...futureUpPrices),
+      futureMinimumDownPrice: futureDownPrices.length === 0 ? null : Math.min(...futureDownPrices),
+      futureFinalUpPrice: lastPresentPrice(futureSlice.map((point) => point.upPrice)),
+      futureFinalDownPrice: lastPresentPrice(futureSlice.map((point) => point.downPrice)),
+      ...labels,
+    } as NormalizedPricePoint;
+  });
+}
+
+export function findLatestExternalPricePointAtOrBeforeTimestamp(pricePoints: ExternalPricePoint[], timestampMilliseconds: number): ExternalPricePoint | null {
+  let latestPricePoint: ExternalPricePoint | null = null;
+  for (const pricePoint of pricePoints) {
+    if (pricePoint.timestampMilliseconds > timestampMilliseconds) break;
+    latestPricePoint = pricePoint;
   }
-  return bestMatch;
+  return latestPricePoint;
 }
 
-export function findLatestBinancePricePointAtOrBeforeTimestamp<T extends { timestampMilliseconds: number }>(
-  pricePoints: T[],
-  timestampMilliseconds: number,
-): T | null {
+export function findLatestBinancePricePointAtOrBeforeTimestamp(pricePoints: ExternalPricePoint[], timestampMilliseconds: number): ExternalPricePoint | null {
   return findLatestExternalPricePointAtOrBeforeTimestamp(pricePoints, timestampMilliseconds);
 }
 
-export function calculatePriceHistoryQualityMetrics(priceHistory: PriceHistoryPoint[]) {
+export function calculatePriceHistoryQualityMetrics(priceHistory: PriceHistoryPoint[]): PriceHistoryQualityMetrics {
   if (priceHistory.length === 0) {
     return { pointsCount: 0, minimumTimestampMilliseconds: null, maximumTimestampMilliseconds: null, medianGapMilliseconds: null, maximumGapMilliseconds: null };
   }
@@ -178,4 +212,12 @@ function median(values: number[]): number {
 
 function mergeUniqueFlags(flags: string[]): string[] {
   return [...new Set(flags)];
+}
+
+function thresholdSuffix(threshold: number): string {
+  return Math.round(threshold * 100).toString().padStart(3, '0');
+}
+
+function lastPresentPrice(prices: Array<number | null>): number | null {
+  return [...prices].reverse().find((price): price is number => price !== null) ?? null;
 }
