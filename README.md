@@ -117,17 +117,30 @@ Timestamps may be seconds, milliseconds, or microseconds; they are normalized to
 
 Binance BTCUSDT is only an optional secondary predictive signal. If `--include-binance-secondary-signal false` is used, Binance columns are null and rows should not receive `binance_secondary_signal_missing` because the signal was intentionally disabled.
 
-A Binance-only proxy mode exists only for pipeline debugging:
+A Binance-only proxy mode exists only for pipeline debugging. This mode must not be used for real outcome/distance analytics or official strategy conclusions. It fills the `chainlink_*` fields from Binance only to test the pipeline, and every row is flagged `proxy_primary_price_source_not_official`. By default this mode is disabled; without `--chainlink-input-file`, `build-dataset` fails with a clear error unless proxy debug mode is explicitly enabled and raw Binance files are available.
+
+Proxy mode has two valid workflows.
+
+A) Full pipeline proxy debug. After the collector fix, `all` downloads the required raw Binance files automatically when proxy debug mode is enabled and no Chainlink input file is provided:
 
 ```bash
-npm run collector -- build-dataset \
+npm run collector -- all \
   --start-date 2026-05-01 \
   --end-date 2026-05-02 \
+  --price-fidelity-minutes 1 \
   --allow-proxy-primary-price-source-for-debug true \
   --include-binance-secondary-signal false
 ```
 
-This mode must not be used for real outcome/distance analytics or official strategy conclusions. It fills the primary Chainlink-shaped fields from Binance only to test the pipeline, and every row is flagged `proxy_primary_price_source_not_official`. By default this mode is disabled; without `--chainlink-input-file`, `build-dataset` fails with a clear error.
+B) Manual stage proxy debug. If you run individual stages, `build-dataset` expects the raw Binance files to already exist, so run `download-binance` before `build-dataset`:
+
+```bash
+npm run collector -- discover --start-date 2026-05-01 --end-date 2026-05-02
+npm run collector -- download-polymarket-prices --start-date 2026-05-01 --end-date 2026-05-02 --price-fidelity-minutes 1
+npm run collector -- download-binance --start-date 2026-05-01 --end-date 2026-05-02 --symbol BTCUSDT --binance-data-type aggTrades
+npm run collector -- build-dataset --start-date 2026-05-01 --end-date 2026-05-02 --allow-proxy-primary-price-source-for-debug true --include-binance-secondary-signal false
+npm run collector -- summarize --start-date 2026-05-01 --end-date 2026-05-02
+```
 
 Polymarket CLOB `prices-history` `fidelity` is expressed in **minutes, not seconds**. Use `--price-fidelity-minutes`; values below `1` are rejected because the public API accepts minute buckets. Polymarket prices-history fidelity is in minutes, not seconds. The documented default is 1 minute. Public `prices-history` can still be too coarse for closed 5-minute markets, so rows with too few or coarse price points must not be trusted for threshold timing analysis.
 
@@ -150,7 +163,7 @@ Possible flags include:
 - `price_history_does_not_cover_market_end`
 - `price_history_missing_up`
 - `price_history_missing_down`
-- `chainlink_price_missing_before_timestamp`
+- `primary_price_missing_before_timestamp` (row is skipped; counted in logs, not attached to valid rows)
 - `chainlink_data_unavailable`
 - `chainlink_history_too_sparse`
 - `binance_secondary_signal_missing`

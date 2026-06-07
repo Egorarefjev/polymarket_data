@@ -1,7 +1,12 @@
 import type { ExternalPricePoint, NormalizedMarket, NormalizedPricePoint, PriceHistoryPoint } from './domain.js';
 import { calculateDistanceToTarget, calculateSecondsLeft } from './calculations.js';
 
-export function buildNormalizedPricePointsForMarket(parameters: {
+export interface BuildNormalizedPricePointsForMarketResult {
+  pricePoints: NormalizedPricePoint[];
+  skippedRowsMissingPrimaryPriceBeforeTimestamp: number;
+}
+
+interface BuildNormalizedPricePointsForMarketParameters {
   market: NormalizedMarket;
   upPriceHistory: PriceHistoryPoint[];
   downPriceHistory: PriceHistoryPoint[];
@@ -10,9 +15,15 @@ export function buildNormalizedPricePointsForMarket(parameters: {
   isBinanceSecondarySignalEnabled: boolean;
   isProxyPrimaryPriceSourceForDebug?: boolean;
   requestedFidelityMinutes: number;
-}): NormalizedPricePoint[] {
+}
+
+export function buildNormalizedPricePointsForMarket(parameters: BuildNormalizedPricePointsForMarketParameters): NormalizedPricePoint[] {
+  return buildNormalizedPricePointsForMarketWithSkipCount(parameters).pricePoints;
+}
+
+export function buildNormalizedPricePointsForMarketWithSkipCount(parameters: BuildNormalizedPricePointsForMarketParameters): BuildNormalizedPricePointsForMarketResult {
   const { market, upPriceHistory, downPriceHistory, primaryExternalPricePoints, binanceSecondaryPricePoints = [], isBinanceSecondarySignalEnabled, isProxyPrimaryPriceSourceForDebug = false, requestedFidelityMinutes } = parameters;
-  if (market.targetPrice === null) return [];
+  if (market.targetPrice === null) return { pricePoints: [], skippedRowsMissingPrimaryPriceBeforeTimestamp: 0 };
 
   const upPriceByTimestamp = new Map(upPriceHistory.map((pricePoint) => [pricePoint.timestampMilliseconds, pricePoint.price]));
   const downPriceByTimestamp = new Map(downPriceHistory.map((pricePoint) => [pricePoint.timestampMilliseconds, pricePoint.price]));
@@ -34,11 +45,15 @@ export function buildNormalizedPricePointsForMarket(parameters: {
     ...(isProxyPrimaryPriceSourceForDebug ? ['proxy_primary_price_source_not_official'] : []),
   ]);
 
-  return allTimestamps.flatMap((timestampMilliseconds) => {
+  let skippedRowsMissingPrimaryPriceBeforeTimestamp = 0;
+  const pricePoints = allTimestamps.flatMap((timestampMilliseconds) => {
     // Causal as-of join: for each Polymarket price timestamp, use only the latest
-    // Chainlink BTC/USD Data Stream point at or before that timestamp. Never use future prices.
+    // primary price point at or before that timestamp. Never use future prices.
     const chainlinkPricePoint = findLatestExternalPricePointAtOrBeforeTimestamp(orderedPrimaryPricePoints, timestampMilliseconds);
-    if (chainlinkPricePoint === null) return [];
+    if (chainlinkPricePoint === null) {
+      skippedRowsMissingPrimaryPriceBeforeTimestamp += 1;
+      return [];
+    }
 
     const chainlinkDistanceToTarget = calculateDistanceToTarget(chainlinkPricePoint.price, market.targetPrice ?? 0);
     const dataQualityFlags = [...baseQualityFlags];
@@ -79,6 +94,8 @@ export function buildNormalizedPricePointsForMarket(parameters: {
       },
     ];
   });
+
+  return { pricePoints, skippedRowsMissingPrimaryPriceBeforeTimestamp };
 }
 
 export function findLatestExternalPricePointAtOrBeforeTimestamp<T extends { timestampMilliseconds: number }>(

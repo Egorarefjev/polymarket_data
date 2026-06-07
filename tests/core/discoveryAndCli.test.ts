@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { PolymarketGammaApiAdapter } from '../../src/adapters/polymarketGammaApi.js';
 import { PolymarketClobApiAdapter } from '../../src/adapters/polymarketClobApi.js';
@@ -79,5 +80,16 @@ describe('collector CLI validation', () => {
     });
     expect(result.status).not.toBe(0);
     expect(`${result.stderr}${result.stdout}`).toContain("unknown option '--price-fidelity-seconds'");
+  });
+});
+
+
+describe('README proxy examples', () => {
+  it('documents a proxy all command that is valid after automatic Binance download fix', async () => {
+    const readme = await readFile('README.md', 'utf8');
+    expect(readme).toContain('npm run collector -- all \\');
+    expect(readme).toContain('--allow-proxy-primary-price-source-for-debug true \\');
+    expect(readme).toContain('--include-binance-secondary-signal false');
+    expect(readme).toContain('downloads the required raw Binance files automatically');
   });
 });
