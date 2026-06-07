@@ -57,6 +57,7 @@ npm run collector -- all \
   --symbol BTCUSDT \
   --price-fidelity-minutes 1 \
   --primary-price-source chainlink \
+  --chainlink-input-file ./chainlink_btc_usd_2026-05-01.jsonl \
   --include-binance-secondary-signal true
 ```
 
@@ -71,6 +72,7 @@ npm run collector -- all \
   --symbol BTCUSDT \
   --price-fidelity-minutes 1 \
   --primary-price-source chainlink \
+  --chainlink-input-file ./chainlink_btc_usd_2026-05-01_2026-05-08.csv \
   --include-binance-secondary-signal true \
   --maximum-concurrent-requests 4 \
   --request-delay-milliseconds 200
@@ -82,7 +84,7 @@ You can run individual stages if you want finer control:
 npm run collector -- discover --start-date 2026-05-01 --end-date 2026-05-08
 npm run collector -- download-polymarket-prices --start-date 2026-05-01 --end-date 2026-05-08 --price-fidelity-minutes 1
 npm run collector -- download-binance --start-date 2026-05-01 --end-date 2026-05-08 --symbol BTCUSDT --binance-data-type aggTrades
-npm run collector -- build-dataset --start-date 2026-05-01 --end-date 2026-05-08
+npm run collector -- build-dataset --start-date 2026-05-01 --end-date 2026-05-08 --chainlink-input-file ./chainlink_btc_usd_2026-05-01_2026-05-08.csv
 npm run collector -- summarize --start-date 2026-05-01 --end-date 2026-05-08
 ```
 
@@ -90,11 +92,44 @@ npm run collector -- summarize --start-date 2026-05-01 --end-date 2026-05-08
 
 The collector intentionally uses public Gamma, public CLOB `prices-history`, and public Binance archives as an optional secondary signal. A full historical orderbook replay requires historical order-level depth snapshots and updates, which are not equivalent to public price history and may not be freely exposed as a complete archive. The collector does not use authenticated or trading endpoints to obtain private order data.
 
-## 7. Price sources and price-history fidelity
+## 7. Price sources, Chainlink input, and price-history fidelity
 
-Polymarket BTC Up/Down 5-minute market rules resolve using the Chainlink BTC/USD Data Stream. Therefore Chainlink is the collector's primary analytical price source for target/start price validation, current and final target distance, winner validation, and all main `chainlink_distance_basis_points` fields. Binance BTCUSDT is retained only as an optional secondary predictive signal. Any analysis based only on Binance is proxy analysis and must not be treated as official Polymarket resolution logic. A future Chainlink Data Stream history integration should replace proxy-only workflows completely.
+Polymarket BTC Up/Down 5-minute market rules resolve using the Chainlink BTC/USD Data Stream. Therefore Chainlink is the collector's primary analytical price source for target/start price validation, current and final target distance, winner validation, and all main `chainlink_distance_basis_points` fields.
 
-Polymarket CLOB `prices-history` `fidelity` is expressed in **minutes, not seconds**. Use `--price-fidelity-minutes`; values below `1` are rejected because the public API accepts minute buckets. The documented default is 1 minute. Public `prices-history` can still be too coarse for closed 5-minute markets, so rows with too few or coarse price points must not be trusted for threshold timing analysis.
+Chainlink Data Streams REST API historical reports require authenticated access, so this collector supports a local Chainlink historical input file instead of attempting unauthenticated public history downloads. Official dataset builds require `--chainlink-input-file <path>`. The supported local formats are:
+
+CSV:
+
+```csv
+timestamp_milliseconds,price
+1717200000000,67500.12
+```
+
+Accepted CSV timestamp aliases are `timestamp`, `timestamp_ms`, `timestampMilliseconds`, and `observationsTimestamp`; the Chainlink price may be `price` or `benchmarkPrice`. JSON/JSONL uses the same fields, for example:
+
+```jsonl
+{"timestamp_milliseconds":1717200000000,"price":67500.12}
+{"timestampMilliseconds":1717200000000,"price":67500.12}
+{"observationsTimestamp":1717200000,"benchmarkPrice":67500.12}
+```
+
+Timestamps may be seconds, milliseconds, or microseconds; they are normalized to milliseconds. Prices must be finite positive numbers. Input rows are sorted ascending and duplicate timestamps keep the last record.
+
+Binance BTCUSDT is only an optional secondary predictive signal. If `--include-binance-secondary-signal false` is used, Binance columns are null and rows should not receive `binance_secondary_signal_missing` because the signal was intentionally disabled.
+
+A Binance-only proxy mode exists only for pipeline debugging:
+
+```bash
+npm run collector -- build-dataset \
+  --start-date 2026-05-01 \
+  --end-date 2026-05-02 \
+  --allow-proxy-primary-price-source-for-debug true \
+  --include-binance-secondary-signal false
+```
+
+This mode must not be used for real outcome/distance analytics or official strategy conclusions. It fills the primary Chainlink-shaped fields from Binance only to test the pipeline, and every row is flagged `proxy_primary_price_source_not_official`. By default this mode is disabled; without `--chainlink-input-file`, `build-dataset` fails with a clear error.
+
+Polymarket CLOB `prices-history` `fidelity` is expressed in **minutes, not seconds**. Use `--price-fidelity-minutes`; values below `1` are rejected because the public API accepts minute buckets. Polymarket prices-history fidelity is in minutes, not seconds. The documented default is 1 minute. Public `prices-history` can still be too coarse for closed 5-minute markets, so rows with too few or coarse price points must not be trusted for threshold timing analysis.
 
 ## 8. Price-history vs orderbook
 
@@ -121,6 +156,7 @@ Possible flags include:
 - `binance_secondary_signal_missing`
 - `binance_chainlink_divergence_high`
 - `trades_unavailable_without_public_endpoint`
+- `proxy_primary_price_source_not_official`
 - `dataset_build_error:<message>`
 
 Bad or suspicious market-level data is written to rejected outputs instead of crashing the full pipeline.
@@ -148,9 +184,7 @@ LIMIT 10;
 
 Start with one day and inspect `rejected_markets` and `data_quality_flags`. Then increase the range gradually:
 
-1. Run 1 day with `--price-fidelity-minutes 1
-  --primary-price-source chainlink
-  --include-binance-secondary-signal true`.
+1. Run 1 day with `--price-fidelity-minutes 1`, `--primary-price-source chainlink`, `--chainlink-input-file <path>`, and optionally `--include-binance-secondary-signal true`.
 2. Run 7 days and check API rate limits and disk usage.
 3. Increase `--request-delay-milliseconds` if public APIs throttle.
 4. Lower `--maximum-concurrent-requests` for stability.

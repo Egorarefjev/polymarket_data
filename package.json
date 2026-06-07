@@ -8,11 +8,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run --exclude \"dist/**\"",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write .",
     "collector": "tsx src/cli/collector.ts",
-    "collector:sample": "tsx src/cli/collector.ts all --start-date 2026-05-01 --end-date 2026-05-02 --symbol BTCUSDT --price-fidelity-minutes 1 --primary-price-source chainlink --include-binance-secondary-signal true"
+    "collector:sample": "tsx src/cli/collector.ts all --start-date 2026-05-01 --end-date 2026-05-02 --symbol BTCUSDT --price-fidelity-minutes 1 --primary-price-source chainlink --chainlink-input-file ./chainlink_btc_usd_2026-05-01.jsonl --include-binance-secondary-signal true"
   },
   "dependencies": {
     "adm-zip": "^0.5.16",

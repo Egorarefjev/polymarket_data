@@ -7,9 +7,11 @@ export function buildNormalizedPricePointsForMarket(parameters: {
   downPriceHistory: PriceHistoryPoint[];
   primaryExternalPricePoints: ExternalPricePoint[];
   binanceSecondaryPricePoints?: ExternalPricePoint[];
+  isBinanceSecondarySignalEnabled: boolean;
+  isProxyPrimaryPriceSourceForDebug?: boolean;
   requestedFidelityMinutes: number;
 }): NormalizedPricePoint[] {
-  const { market, upPriceHistory, downPriceHistory, primaryExternalPricePoints, binanceSecondaryPricePoints = [], requestedFidelityMinutes } = parameters;
+  const { market, upPriceHistory, downPriceHistory, primaryExternalPricePoints, binanceSecondaryPricePoints = [], isBinanceSecondarySignalEnabled, isProxyPrimaryPriceSourceForDebug = false, requestedFidelityMinutes } = parameters;
   if (market.targetPrice === null) return [];
 
   const upPriceByTimestamp = new Map(upPriceHistory.map((pricePoint) => [pricePoint.timestampMilliseconds, pricePoint.price]));
@@ -29,6 +31,7 @@ export function buildNormalizedPricePointsForMarket(parameters: {
     ...buildPriceHistoryQualityFlags('down', downPriceHistory, market, requestedFidelityMinutes),
     ...(orderedPrimaryPricePoints.length === 0 ? ['chainlink_data_unavailable'] : []),
     ...(isExternalHistoryTooSparse(orderedPrimaryPricePoints, requestedFidelityMinutes) ? ['chainlink_history_too_sparse'] : []),
+    ...(isProxyPrimaryPriceSourceForDebug ? ['proxy_primary_price_source_not_official'] : []),
   ]);
 
   return allTimestamps.flatMap((timestampMilliseconds) => {
@@ -44,7 +47,7 @@ export function buildNormalizedPricePointsForMarket(parameters: {
 
     const binancePricePoint = findLatestExternalPricePointAtOrBeforeTimestamp(orderedBinancePricePoints, timestampMilliseconds);
     const binanceDistanceToTarget = binancePricePoint === null ? null : calculateDistanceToTarget(binancePricePoint.price, market.targetPrice ?? 0);
-    if (binancePricePoint === null) dataQualityFlags.push('binance_secondary_signal_missing');
+    if (isBinanceSecondarySignalEnabled && binancePricePoint === null) dataQualityFlags.push('binance_secondary_signal_missing');
     const binanceMinusChainlinkBasisPoints = binanceDistanceToTarget === null
       ? null
       : binanceDistanceToTarget.distanceBasisPoints - chainlinkDistanceToTarget.distanceBasisPoints;
