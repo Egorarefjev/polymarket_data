@@ -12,7 +12,15 @@
     "lint": "eslint . --ext .ts",
     "format": "prettier --write .",
     "collector": "tsx src/cli/collector.ts",
-    "collector:sample": "tsx src/cli/collector.ts all --start-date 2026-05-01 --end-date 2026-05-02 --symbol BTCUSDT --price-fidelity-minutes 1 --primary-price-source chainlink --chainlink-input-file ./chainlink_btc_usd_2026-05-01.jsonl --include-binance-secondary-signal true"
+    "collector:sample": "tsx src/cli/collector.ts all --date 2026-05-01 --market-duration 1h --allow-proxy-primary-price-source-for-debug true",
+    "collect:proxy:1h": "npm run collector -- all --market-duration 1h --allow-proxy-primary-price-source-for-debug true --include-binance-secondary-signal false --binance-data-type klines --write-debug-json false",
+    "collect:proxy:4h": "npm run collector -- all --market-duration 4h --allow-proxy-primary-price-source-for-debug true --include-binance-secondary-signal false --binance-data-type klines --write-debug-json false",
+    "collect:proxy:1d": "npm run collector -- all --market-duration 1d --allow-proxy-primary-price-source-for-debug true --include-binance-secondary-signal false --binance-data-type klines --write-debug-json false",
+    "collect:proxy:all": "npm run collector -- all --market-duration all --allow-proxy-primary-price-source-for-debug true --include-binance-secondary-signal false --binance-data-type klines --write-debug-json false",
+    "collect:official:1h": "npm run collector -- all --market-duration 1h --include-binance-secondary-signal true --binance-data-type aggTrades --write-debug-json false",
+    "collect:official:4h": "npm run collector -- all --market-duration 4h --include-binance-secondary-signal true --binance-data-type aggTrades --write-debug-json false",
+    "collect:official:1d": "npm run collector -- all --market-duration 1d --include-binance-secondary-signal true --binance-data-type aggTrades --write-debug-json false",
+    "collect:official:all": "npm run collector -- all --market-duration all --include-binance-secondary-signal true --binance-data-type aggTrades --write-debug-json false"
   },
   "dependencies": {
     "adm-zip": "^0.5.16",

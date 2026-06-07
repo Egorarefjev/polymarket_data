@@ -58,6 +58,7 @@ describe('market validation and summary', () => {
     marketSlug: 'btc-updown-5m-example',
     conditionId: 'condition',
     question: 'Bitcoin Up or Down from $100,000?',
+    marketDuration: '1h',
     marketStartTimestampMilliseconds: 1_000,
     marketEndTimestampMilliseconds: 301_000,
     upTokenId: 'up-token',
@@ -115,6 +116,7 @@ const alignmentMarket: NormalizedMarket = {
   marketSlug: 'btc-updown-5m-example',
   conditionId: 'condition',
   question: 'Bitcoin Up or Down from $100,000?',
+  marketDuration: '1h',
   marketStartTimestampMilliseconds: 1_000,
   marketEndTimestampMilliseconds: 301_000,
   upTokenId: 'up-token',
@@ -376,12 +378,18 @@ describe('future labels and strategy training rows', () => {
 });
 
 describe('price history quality flags', () => {
-  it('flags one or two points as too few for five-minute market analysis', () => {
-    expect(buildPriceHistoryQualityFlags('up', [{ timestampMilliseconds: 1_000, price: 0.5 }], alignmentMarket, 1)).toContain('price_history_too_few_points_for_five_minute_market');
+  it('flags one or two points as too few for duration-aware market analysis', () => {
+    expect(buildPriceHistoryQualityFlags('up', [{ timestampMilliseconds: 1_000, price: 0.5 }], alignmentMarket, 1)).toContain('price_history_too_few_points_for_duration');
     expect(buildPriceHistoryQualityFlags('down', [
       { timestampMilliseconds: 1_000, price: 0.5 },
       { timestampMilliseconds: 301_000, price: 0.6 },
-    ], alignmentMarket, 1)).toContain('price_history_too_few_points_for_five_minute_market');
+    ], alignmentMarket, 1)).toContain('price_history_too_few_points_for_duration');
+  });
+
+  it('adds duration-aware too-few-points flags for 1h, 4h, and 1d markets', () => {
+    expect(buildPriceHistoryQualityFlags('up', [{ timestampMilliseconds: 1_000, price: 0.5 }], { ...alignmentMarket, marketDuration: '1h' }, 1)).toContain('price_history_too_few_points_for_duration');
+    expect(buildPriceHistoryQualityFlags('up', Array.from({ length: 20 }, (_, index) => ({ timestampMilliseconds: 1_000 + index * 60_000, price: 0.5 })), { ...alignmentMarket, marketDuration: '4h', marketEndTimestampMilliseconds: 14_401_000 }, 1)).toContain('price_history_too_few_points_for_duration');
+    expect(buildPriceHistoryQualityFlags('up', Array.from({ length: 50 }, (_, index) => ({ timestampMilliseconds: 1_000 + index * 60_000, price: 0.5 })), { ...alignmentMarket, marketDuration: '1d', marketEndTimestampMilliseconds: 86_401_000 }, 1)).toContain('price_history_too_few_points_for_duration');
   });
 });
 
@@ -425,14 +433,13 @@ describe('Chainlink local input parsing', () => {
     ]);
   });
 });
-
-
 describe('full pipeline Binance download decision', () => {
   const baseOptions: CollectorOptions = {
     startDate: '2026-05-01',
     endDate: '2026-05-02',
     symbol: 'BTCUSDT',
     priceFidelityMinutes: 1,
+    marketDuration: '1h',
     force: true,
     requestDelayMilliseconds: 0,
     maximumConcurrentRequests: 1,
@@ -518,6 +525,7 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
     endDate: '2026-05-02',
     symbol: 'BTCUSDT',
     priceFidelityMinutes: 1,
+    marketDuration: '1h',
     force: true,
     requestDelayMilliseconds: 0,
     maximumConcurrentRequests: 1,

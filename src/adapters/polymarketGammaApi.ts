@@ -1,4 +1,4 @@
-import type { NormalizedMarket, RejectedMarket } from '../core/domain.js';
+import type { MarketDuration, NormalizedMarket, RejectedMarket, RequestedMarketDuration } from '../core/domain.js';
 import { determineMarketWinner, extractTargetPrice, parseOutcomePrices, parseOutcomes } from '../core/parsing.js';
 import { normalizeTimestampMilliseconds } from '../core/calculations.js';
 import { validateMarketForAnalysis } from '../core/validation.js';
@@ -17,7 +17,7 @@ export class PolymarketGammaApiAdapter {
     private readonly baseUrl = 'https://gamma-api.polymarket.com',
   ) {}
 
-  public async discoverBitcoinUpDownFiveMinuteMarkets(startDate: string, endDate: string): Promise<Record<string, unknown>[]> {
+  public async discoverBitcoinUpDownMarkets(startDate: string, endDate: string): Promise<Record<string, unknown>[]> {
     const discovery = (await this.tryDiscoverWithKeysetPagination(startDate, endDate)) ?? (await this.discoverWithOffsetPagination(startDate, endDate));
     if (!doesFetchedRangeCoverRequestedRange(discovery.earliestFetchedEndDate, discovery.latestFetchedEndDate, startDate, endDate)) {
       // eslint-disable-next-line no-console
@@ -68,7 +68,7 @@ export class PolymarketGammaApiAdapter {
             latestFetchedEndTimestamp = latestFetchedEndTimestamp === null ? endTimestamp : Math.max(latestFetchedEndTimestamp, endTimestamp);
           }
         }
-        allRawMarkets.push(...rawMarkets.filter(isBitcoinUpDownFiveMinuteMarket));
+        allRawMarkets.push(...rawMarkets);
         const nextCursor = typeof rawPage['next_cursor'] === 'string' ? rawPage['next_cursor'] : typeof rawPage['nextCursor'] === 'string' ? rawPage['nextCursor'] : null;
         if (rawMarkets.length === 0 || rawMarkets.length < limit || nextCursor === null) break;
         afterCursor = nextCursor;
@@ -109,7 +109,7 @@ export class PolymarketGammaApiAdapter {
           latestFetchedEndTimestamp = latestFetchedEndTimestamp === null ? endTimestamp : Math.max(latestFetchedEndTimestamp, endTimestamp);
         }
       }
-      allRawMarkets.push(...rawMarkets.filter(isBitcoinUpDownFiveMinuteMarket));
+      allRawMarkets.push(...rawMarkets);
       if (rawMarkets.length === 0 || rawMarkets.length < limit) break;
       offset += limit;
     }
@@ -122,13 +122,32 @@ export class PolymarketGammaApiAdapter {
     };
   }
 
-  public parseMarkets(rawMarkets: Record<string, unknown>[], rawMarketFilePath: string): GammaDiscoveryResult {
+  public async discoverBitcoinUpDownFiveMinuteMarkets(startDate: string, endDate: string): Promise<Record<string, unknown>[]> {
+    return this.discoverBitcoinUpDownMarkets(startDate, endDate);
+  }
+
+  public parseMarkets(rawMarkets: Record<string, unknown>[], rawMarketFilePath: string, requestedMarketDuration: RequestedMarketDuration = '1h'): GammaDiscoveryResult {
     const acceptedMarkets: NormalizedMarket[] = [];
     const rejectedMarkets: RejectedMarket[] = [];
 
     for (const rawMarket of rawMarkets) {
+      const detectedMarketDuration = detectMarketDuration(rawMarket);
       try {
-        const normalizedMarket = normalizeGammaMarket(rawMarket);
+        if (!isBitcoinUpDownMarket(rawMarket)) {
+          rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, 'not_bitcoin_up_down', detectedMarketDuration, ['not_bitcoin_up_down']));
+          continue;
+        }
+        if (detectedMarketDuration === null) {
+          const rejectionReason = hasUnsupportedDurationSignal(rawMarket) ? 'unsupported_duration' : 'unknown_duration';
+          rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, rejectionReason, null, [rejectionReason]));
+          continue;
+        }
+        if (!isRequestedMarketDuration(detectedMarketDuration, requestedMarketDuration)) {
+          rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, 'unsupported_duration', detectedMarketDuration, ['unsupported_duration']));
+          continue;
+        }
+
+        const normalizedMarket = normalizeGammaMarket(rawMarket, detectedMarketDuration);
         const validationResult = validateMarketForAnalysis(normalizedMarket);
         if (validationResult.accepted) {
           acceptedMarkets.push({ ...normalizedMarket, dataQualityFlags: validationResult.dataQualityFlags });
@@ -140,6 +159,7 @@ export class PolymarketGammaApiAdapter {
             rejectionReason: validationResult.rejectionReason ?? 'unknown_rejection_reason',
             rawMarketFilePath,
             dataQualityFlags: validationResult.dataQualityFlags,
+            detectedMarketDuration,
           });
         }
       } catch (error) {
@@ -150,6 +170,7 @@ export class PolymarketGammaApiAdapter {
           rejectionReason: 'market_parsing_error',
           rawMarketFilePath,
           dataQualityFlags: [`market_parsing_error:${(error as Error).message}`],
+          detectedMarketDuration,
         });
       }
     }
@@ -158,7 +179,7 @@ export class PolymarketGammaApiAdapter {
   }
 }
 
-function normalizeGammaMarket(rawMarket: Record<string, unknown>): NormalizedMarket {
+function normalizeGammaMarket(rawMarket: Record<string, unknown>, marketDuration: MarketDuration): NormalizedMarket {
   const rawOutcomes = rawMarket['outcomes'] ?? rawMarket['shortOutcomes'] ?? [];
   const rawOutcomePrices = rawMarket['outcomePrices'] ?? [];
   const outcomes = parseOutcomes(rawOutcomes);
@@ -176,6 +197,7 @@ function normalizeGammaMarket(rawMarket: Record<string, unknown>): NormalizedMar
     marketSlug: stringField(rawMarket, 'slug') ?? stringField(rawMarket, 'marketSlug') ?? question.toLowerCase().replaceAll(/\s+/gu, '-'),
     conditionId: stringField(rawMarket, 'conditionId') ?? stringField(rawMarket, 'condition_id'),
     question,
+    marketDuration,
     marketStartTimestampMilliseconds,
     marketEndTimestampMilliseconds,
     upTokenId,
@@ -200,16 +222,76 @@ function normalizeGammaMarket(rawMarket: Record<string, unknown>): NormalizedMar
   };
 }
 
-function isBitcoinUpDownFiveMinuteMarket(rawMarket: Record<string, unknown>): boolean {
-  const searchableText = [rawMarket['slug'], rawMarket['question'], rawMarket['title'], rawMarket['description']]
-    .filter((value): value is string => typeof value === 'string')
-    .join(' ')
-    .toLowerCase();
-  return (
-    /\b(bitcoin|btc)\b/u.test(searchableText) &&
-    /(up|down)/u.test(searchableText) &&
-    /(5m|5-min|5 min|5 minute|five minute)/u.test(searchableText)
-  );
+export function isBitcoinUpDownMarket(rawMarket: Record<string, unknown>): boolean {
+  const searchableText = buildSearchableMarketText(rawMarket);
+  return /\b(bitcoin|btc)\b/u.test(searchableText) && /\b(up\s*(?:or|\/)?\s*down|up\/down|up|down)\b/u.test(searchableText);
+}
+
+export function detectMarketDuration(rawMarket: Record<string, unknown>): MarketDuration | null {
+  const timestampDuration = detectMarketDurationFromTimestamps(rawMarket);
+  if (timestampDuration !== null) return timestampDuration;
+
+  const searchableText = buildSearchableMarketText(rawMarket);
+  if (/\b(1h|1\s*h|one\s*hour|hourly|hour-long|1-hour|1\s*hour)\b/u.test(searchableText)) return '1h';
+  if (/\b(4h|4\s*h|four\s*hour|four-hour|4-hour|4\s*hour)\b/u.test(searchableText)) return '4h';
+  if (/\b(1d|1\s*d|daily|day-long|1-day|1\s*day|24h|24\s*h|24-hour|24\s*hour)\b/u.test(searchableText)) return '1d';
+  return null;
+}
+
+export function isRequestedMarketDuration(detectedDuration: MarketDuration | null, requestedDuration: RequestedMarketDuration): boolean {
+  return detectedDuration !== null && (requestedDuration === 'all' || detectedDuration === requestedDuration);
+}
+
+function hasUnsupportedDurationSignal(rawMarket: Record<string, unknown>): boolean {
+  if (detectUnsupportedDurationFromTimestamps(rawMarket)) return true;
+  return /\b(5m|5\s*m|5-min|5\s*min|5\s*minute|five\s*minute)\b/u.test(buildSearchableMarketText(rawMarket));
+}
+
+function detectMarketDurationFromTimestamps(rawMarket: Record<string, unknown>): MarketDuration | null {
+  const startTimestamp = extractTime(rawMarket, ['startDate', 'startDateIso', 'gameStartTime', 'eventStartTime', 'startTime']);
+  const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']);
+  if (startTimestamp === null || endTimestamp === null) return null;
+  const durationMilliseconds = endTimestamp - startTimestamp;
+  const toleranceMilliseconds = 5 * 60_000;
+  if (Math.abs(durationMilliseconds - 60 * 60_000) <= toleranceMilliseconds) return '1h';
+  if (Math.abs(durationMilliseconds - 4 * 60 * 60_000) <= toleranceMilliseconds) return '4h';
+  if (Math.abs(durationMilliseconds - 24 * 60 * 60_000) <= toleranceMilliseconds) return '1d';
+  return null;
+}
+
+function detectUnsupportedDurationFromTimestamps(rawMarket: Record<string, unknown>): boolean {
+  const startTimestamp = extractTime(rawMarket, ['startDate', 'startDateIso', 'gameStartTime', 'eventStartTime', 'startTime']);
+  const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']);
+  if (startTimestamp === null || endTimestamp === null) return false;
+  const durationMilliseconds = endTimestamp - startTimestamp;
+  const toleranceMilliseconds = 5 * 60_000;
+  return durationMilliseconds > 0 && ![60 * 60_000, 4 * 60 * 60_000, 24 * 60 * 60_000].some((supportedDuration) => Math.abs(durationMilliseconds - supportedDuration) <= toleranceMilliseconds);
+}
+
+function buildSearchableMarketText(rawMarket: Record<string, unknown>): string {
+  const directText = [rawMarket['slug'], rawMarket['marketSlug'], rawMarket['question'], rawMarket['title'], rawMarket['description'], rawMarket['rules']]
+    .filter((value): value is string => typeof value === 'string');
+  const eventText = extractNestedText(rawMarket['event']).concat(extractNestedText(rawMarket['events']));
+  return [...directText, ...eventText].join(' ').toLowerCase();
+}
+
+function extractNestedText(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(extractNestedText);
+  if (!isRecord(value)) return [];
+  return ['slug', 'title', 'question', 'description', 'name'].flatMap((fieldName) => extractNestedText(value[fieldName]));
+}
+
+function buildRejectedRawMarket(rawMarket: Record<string, unknown>, rawMarketFilePath: string, rejectionReason: string, detectedMarketDuration: MarketDuration | null, dataQualityFlags: string[]): RejectedMarket {
+  return {
+    marketSlug: typeof rawMarket['slug'] === 'string' ? rawMarket['slug'] : null,
+    conditionId: typeof rawMarket['conditionId'] === 'string' ? rawMarket['conditionId'] : typeof rawMarket['condition_id'] === 'string' ? rawMarket['condition_id'] : null,
+    question: typeof rawMarket['question'] === 'string' ? rawMarket['question'] : typeof rawMarket['title'] === 'string' ? rawMarket['title'] : null,
+    rejectionReason,
+    rawMarketFilePath,
+    dataQualityFlags,
+    detectedMarketDuration,
+  };
 }
 
 function setGammaDateFilterSearchParams(url: URL, startDate: string, endDate: string): void {
@@ -253,15 +335,37 @@ function findTokenIdForOutcome(outcomes: string[], tokenIds: string[], desiredOu
 }
 
 function extractTime(rawMarket: Record<string, unknown>, fieldNames: string[]): number | null {
+  return extractTimeFromValue(rawMarket, fieldNames, 0);
+}
+
+function extractTimeFromValue(value: unknown, fieldNames: string[], depth: number): number | null {
+  if (depth > 2 || !isRecord(value)) return null;
   for (const fieldName of fieldNames) {
-    const rawValue = rawMarket[fieldName];
-    if (typeof rawValue === 'number') return normalizeTimestampMilliseconds(rawValue);
-    if (typeof rawValue === 'string') {
-      const numericValue = Number(rawValue);
-      if (Number.isFinite(numericValue)) return normalizeTimestampMilliseconds(numericValue);
-      const parsedDate = Date.parse(rawValue);
-      if (Number.isFinite(parsedDate)) return parsedDate;
+    const timestamp = parseTimestampValue(value[fieldName]);
+    if (timestamp !== null) return timestamp;
+  }
+  for (const nestedFieldName of ['event', 'events', 'metadata']) {
+    const nestedValue = value[nestedFieldName];
+    if (Array.isArray(nestedValue)) {
+      for (const entry of nestedValue) {
+        const nestedTimestamp = extractTimeFromValue(entry, fieldNames, depth + 1);
+        if (nestedTimestamp !== null) return nestedTimestamp;
+      }
+    } else {
+      const nestedTimestamp = extractTimeFromValue(nestedValue, fieldNames, depth + 1);
+      if (nestedTimestamp !== null) return nestedTimestamp;
     }
+  }
+  return null;
+}
+
+function parseTimestampValue(rawValue: unknown): number | null {
+  if (typeof rawValue === 'number') return normalizeTimestampMilliseconds(rawValue);
+  if (typeof rawValue === 'string') {
+    const numericValue = Number(rawValue);
+    if (Number.isFinite(numericValue)) return normalizeTimestampMilliseconds(numericValue);
+    const parsedDate = Date.parse(rawValue);
+    if (Number.isFinite(parsedDate)) return parsedDate;
   }
   return null;
 }
