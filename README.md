@@ -6,7 +6,7 @@ The project no longer centers the main workflow on 5-minute markets. Polymarket 
 
 ## What the project does
 
-The collector downloads public data and normalizes it into analysis tables:
+The collector downloads public Gamma market metadata, Polymarket `prices-history` trajectories, and optional Binance/Chainlink price inputs, then normalizes them into analysis tables. It does **not** collect Polymarket trades or order books:
 
 - `data/processed/markets_<duration>_<start>_<end>.parquet`
 - `data/processed/price_points_<duration>_<start>_<end>.parquet`
@@ -73,13 +73,21 @@ Minimal equivalent 1h proxy command:
 npm run collector -- all --date 2026-05-01 --allow-proxy-primary-price-source-for-debug true
 ```
 
-Proxy all durations example:
+First smoke command:
 
 ```bash
-npm run collect:proxy:all -- --date 2026-05-01
+npm run collect:proxy:all -- --date 2026-05-01 --force
 ```
 
-When `all` runs in proxy debug mode without Chainlink, it downloads the required raw Binance files automatically because Binance becomes the non-official primary proxy source. If you run manual stages, run `download-binance` before `build-dataset`.
+Expected discovery/build signs:
+
+- `candidateMarketsFetched > 0`;
+- `acceptedMarkets > 0`;
+- `data/processed/price_points_all_2026-05-01_2026-05-02.parquet` is written.
+
+If `acceptedMarkets = 0`, the `all` pipeline stops instead of downloading prices/Binance or building an empty dataset. Inspect `data/raw/gamma/btc-up-down_candidates_<duration>_<start>_<end>.json`, try another date, or debug Gamma query discovery. The broad date scan fallback is disabled by default; enable `--allow-broad-gamma-date-scan true` only for debugging because it can fetch unrelated markets.
+
+When `all` runs in proxy debug mode without Chainlink, it downloads the required raw Binance files automatically because Binance becomes the non-official primary proxy source. The Binance proxy is only for pipeline debugging, never official analysis. If you run manual stages, run `download-binance` before `build-dataset`.
 
 ## Official Chainlink commands
 
@@ -109,7 +117,7 @@ The collector has these sane defaults:
 
 ## Price-source semantics
 
-Polymarket BTC Up/Down market rules resolve using Chainlink BTC/USD Data Streams. For real analytical conclusions and strategy research, use official Chainlink mode only.
+Polymarket BTC Up/Down market rules resolve using Chainlink BTC/USD Data Streams. For official analytical conclusions and strategy research, use official Chainlink mode only. Binance proxy output is debug-only.
 
 Official Chainlink mode:
 
@@ -153,7 +161,7 @@ Timestamps may be seconds, milliseconds, or microseconds; they are normalized to
 
 ## Price trajectory and strategy labels
 
-`price_points.parquet` stores the full available Polymarket prices-history trajectory for every accepted market. The collector does not keep only threshold hits, maxima/minima, first threshold hits, or another reduced subset.
+`price_points.parquet` stores the full available Polymarket prices-history trajectory for every accepted market. Trades are not collected; the collector uses Polymarket price-history rather than trades or order books. The collector does not keep only threshold hits, maxima/minima, first threshold hits, or another reduced subset.
 
 `strategy_training_rows.parquet` is built from `price_points.parquet` and keeps features and labels separated. It preserves useful future labels including:
 
@@ -174,7 +182,7 @@ The main outputs include `market_duration`:
 - `market_summary.parquet`
 - `strategy_training_rows.parquet`
 
-Rejected market output includes `detected_market_duration` when the collector can determine it.
+Rejected market output includes `detected_market_duration` when the collector can determine it. Normal Gamma discovery writes candidate files named `raw/gamma/btc-up-down_candidates_<duration>_<start>_<end>.json`.
 
 ## Data quality flags
 
@@ -201,7 +209,6 @@ Possible flags include:
 - `chainlink_history_too_sparse`
 - `binance_secondary_signal_missing`
 - `binance_chainlink_divergence_high`
-- `trades_unavailable_without_public_endpoint`
 - `proxy_primary_price_source_not_official`
 - `dataset_build_error:<message>`
 

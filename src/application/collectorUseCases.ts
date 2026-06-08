@@ -2,7 +2,7 @@ import pLimit from 'p-limit';
 import type { FileStorage } from '../adapters/fileStorage.js';
 import type { LocalParquetWriter } from '../adapters/parquetWriter.js';
 import { serializeDataQualityFlags } from '../adapters/parquetWriter.js';
-import type { PolymarketGammaApiAdapter } from '../adapters/polymarketGammaApi.js';
+import { isBitcoinUpDownMarket, type PolymarketGammaApiAdapter } from '../adapters/polymarketGammaApi.js';
 import type { PolymarketClobApiAdapter } from '../adapters/polymarketClobApi.js';
 import type { BinanceArchiveApiAdapter, BinanceDataType, BinanceMarketType } from '../adapters/binanceArchiveApi.js';
 import type { ExternalPriceSource } from '../adapters/externalPriceSource.js';
@@ -29,6 +29,8 @@ export interface CollectorOptions {
   chainlinkInputFile?: string;
   allowProxyPrimaryPriceSourceForDebug: boolean;
   writeDebugJson: boolean;
+  allowBroadGammaDateScan: boolean;
+  allowEmptyMarketSet: boolean;
 }
 
 export interface BuildDatasetResult {
@@ -63,7 +65,7 @@ export class CollectorUseCases {
 
     const rawMarkets = (await this.fileStorage.exists(rawGammaFilePath)) && !options.force
       ? await this.fileStorage.readJson<Record<string, unknown>[]>(rawGammaFilePath)
-      : await this.gammaApiAdapter.discoverBitcoinUpDownMarkets(options.startDate, options.endDate);
+      : await this.gammaApiAdapter.discoverBitcoinUpDownMarkets(options.startDate, options.endDate, { allowBroadGammaDateScan: options.allowBroadGammaDateScan });
     await this.fileStorage.writeJson(rawGammaFilePath, rawMarkets, options.force);
 
     const discoveryResult = this.gammaApiAdapter.parseMarkets(rawMarkets, this.fileStorage.resolve(rawGammaFilePath), options.marketDuration);
@@ -74,7 +76,9 @@ export class CollectorUseCases {
 
     this.logger.info(
       {
-        foundMarkets: rawMarkets.length,
+        rawMarketsFetched: rawMarkets.length,
+        candidateMarketsFetched: rawMarkets.length,
+        locallyMatchedMarkets: rawMarkets.filter(isBitcoinUpDownMarket).length,
         acceptedMarkets: discoveryResult.acceptedMarkets.length,
         rejectedMarkets: discoveryResult.rejectedMarkets.length,
         marketsWithoutTarget: discoveryResult.rejectedMarkets.filter((market) => market.rejectionReason === 'target_price_missing').length,
@@ -120,8 +124,7 @@ export class CollectorUseCases {
   }
 
   public async downloadPolymarketTrades(_options: CollectorOptions): Promise<void> {
-    const tradeAvailability = await this.clobApiAdapter.tryDownloadPublicTrades();
-    this.logger.warn({ dataQualityFlag: tradeAvailability.dataQualityFlag }, 'Public Polymarket trades are unavailable without authenticated endpoint');
+    this.logger.warn({ dataQualityFlag: 'polymarket_trades_command_deprecated' }, 'download-polymarket-trades is deprecated; normal collection uses Polymarket price-history and does not collect trades');
   }
 
   public async downloadBinance(options: CollectorOptions): Promise<void> {
@@ -239,8 +242,11 @@ export class CollectorUseCases {
 
   public async runFullPipeline(options: CollectorOptions): Promise<void> {
     await this.discoverMarkets(options);
+    const acceptedMarkets = await this.readAcceptedMarkets(options);
+    if (acceptedMarkets.length === 0 && !options.allowEmptyMarketSet) {
+      throw new Error('No BTC Up/Down markets accepted for requested date range/duration. Check Gamma discovery queries or try another date.');
+    }
     await this.downloadPolymarketPrices(options);
-    await this.downloadPolymarketTrades(options);
     // Proxy debug mode without Chainlink needs Binance raw files because Binance becomes the non-official primary proxy source.
     if (shouldDownloadBinanceDuringFullPipeline(options)) await this.downloadBinance(options);
     await this.buildDataset(options);
@@ -345,7 +351,7 @@ export function shouldDownloadBinanceDuringFullPipeline(options: Pick<CollectorO
 export function dateRangeStateKey(options: Pick<CollectorOptions, 'startDate' | 'endDate'>): string { return `${options.startDate}_${options.endDate}`; }
 export function collectorStateKey(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `${marketDurationStateKey(options)}_${dateRangeStateKey(options)}`; }
 export function marketDurationStateKey(options: Pick<CollectorOptions, 'marketDuration'>): string { return options.marketDuration; }
-export function rawGammaRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `raw/gamma/btc-up-down_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.json`; }
+export function rawGammaRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `raw/gamma/btc-up-down_candidates_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.json`; }
 export function acceptedMarketsRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `processed/accepted_markets_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.jsonl`; }
 export function rejectedMarketsRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `rejected/rejected_markets_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.jsonl`; }
 export function rawPriceHistoryRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'priceFidelityMinutes' | 'marketDuration'>, marketSlug: string, outcome: 'up' | 'down'): string { return `raw/polymarket-prices/${marketDurationStateKey(options)}_${dateRangeStateKey(options)}_${marketSlug}_${outcome}_${options.priceFidelityMinutes}m.json`; }

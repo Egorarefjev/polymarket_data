@@ -28,7 +28,7 @@ function gammaMarket(id: number): Record<string, unknown> {
 }
 
 describe('Gamma discovery pagination and filters', () => {
-  it('passes server-side end_date_min/end_date_max filters to Gamma API', async () => {
+  it('passes server-side BTC Up/Down query and end-date filters to Gamma API', async () => {
     const httpClient = new MockHttpClient([[gammaMarket(1)]]);
     const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
     await adapter.discoverBitcoinUpDownFiveMinuteMarkets('2026-05-01', '2026-05-02');
@@ -38,16 +38,28 @@ describe('Gamma discovery pagination and filters', () => {
     expect(url?.searchParams.get('ascending')).toBe('true');
     expect(url?.searchParams.get('end_date_min')).toBe('2026-05-01T00:00:00.000Z');
     expect(url?.searchParams.get('end_date_max')).toBe('2026-05-02T00:00:00.000Z');
+    expect(['query', 'q', 'search', 'slug'].some((parameterName) => url?.searchParams.has(parameterName))).toBe(true);
+    expect(url?.pathname).toBe('/markets');
   });
 
-  it('does not stop at the old 10,000 offset cap', async () => {
-    const fullPage = Array.from({ length: 500 }, (_, index) => gammaMarket(index));
-    const responses = Array.from({ length: 22 }, () => fullPage).concat([[gammaMarket(11_000)]]);
-    const httpClient = new MockHttpClient(responses);
+  it('does not use broad keyset/date scan by default and filters unrelated search results out of candidates', async () => {
+    const snowfallMarket = { slug: 'chicago-first-snowfall', question: 'Will Chicago record the first snowfall?', startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-05-01T01:00:00.000Z' };
+    const btcMarket = gammaMarket(1);
+    const httpClient = new MockHttpClient([[snowfallMarket, btcMarket]]);
     const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
     const markets = await adapter.discoverBitcoinUpDownFiveMinuteMarkets('2026-05-01', '2026-05-02');
-    expect(Number(httpClient.urls.at(-1)?.searchParams.get('offset'))).toBeGreaterThan(10_000);
-    expect(markets.length).toBeGreaterThan(10_000);
+    expect(markets).toEqual([btcMarket]);
+    expect(httpClient.urls.every((url) => url.pathname === '/markets')).toBe(true);
+  });
+
+  it('allows broad date scan only when explicitly enabled and flags broad candidates', async () => {
+    const emptySearchResponses = Array.from({ length: 20 }, () => []);
+    const broadMarket = { slug: 'chicago-first-snowfall', question: 'Will Chicago record the first snowfall?', startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-05-01T01:00:00.000Z' };
+    const httpClient = new MockHttpClient([...emptySearchResponses, { markets: [broadMarket] }]);
+    const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
+    const markets = await adapter.discoverBitcoinUpDownFiveMinuteMarkets('2026-05-01', '2026-05-02', { allowBroadGammaDateScan: true });
+    expect(httpClient.urls.some((url) => url.pathname === '/markets/keyset')).toBe(true);
+    expect(markets[0]).toMatchObject({ slug: 'chicago-first-snowfall', __dataQualityFlags: ['broad_gamma_date_scan_candidate'] });
   });
 });
 
@@ -254,6 +266,8 @@ describe('collector CLI date and duration options', () => {
     includeBinanceSecondarySignal: 'false',
     allowProxyPrimaryPriceSourceForDebug: 'false',
     writeDebugJson: 'false',
+    allowBroadGammaDateScan: 'false',
+    allowEmptyMarketSet: 'false',
   };
 
   it('--date converts to inclusive startDate and exclusive endDate + 1 day', () => {
