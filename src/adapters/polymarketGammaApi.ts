@@ -133,8 +133,12 @@ export class PolymarketGammaApiAdapter {
     for (const rawMarket of rawMarkets) {
       const detectedMarketDuration = detectMarketDuration(rawMarket);
       try {
-        if (!isBitcoinUpDownMarket(rawMarket)) {
+        if (!hasBitcoinOrBtcPhrase(rawMarket)) {
           rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, 'not_bitcoin_up_down', detectedMarketDuration, ['not_bitcoin_up_down']));
+          continue;
+        }
+        if (!hasExplicitUpDownProductPhrase(rawMarket)) {
+          rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, 'not_explicit_up_down_product', detectedMarketDuration, ['not_explicit_up_down_product']));
           continue;
         }
         if (detectedMarketDuration === null) {
@@ -144,6 +148,12 @@ export class PolymarketGammaApiAdapter {
         }
         if (!isRequestedMarketDuration(detectedMarketDuration, requestedMarketDuration)) {
           rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, 'unsupported_duration', detectedMarketDuration, ['unsupported_duration']));
+          continue;
+        }
+
+        const outcomes = parseOutcomes(rawMarket['outcomes'] ?? rawMarket['shortOutcomes'] ?? []);
+        if (!hasExplicitUpDownOutcomes(outcomes)) {
+          rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, 'non_up_down_outcomes', detectedMarketDuration, ['non_up_down_outcomes']));
           continue;
         }
 
@@ -223,8 +233,19 @@ function normalizeGammaMarket(rawMarket: Record<string, unknown>, marketDuration
 }
 
 export function isBitcoinUpDownMarket(rawMarket: Record<string, unknown>): boolean {
-  const searchableText = buildSearchableMarketText(rawMarket);
-  return /\b(bitcoin|btc)\b/u.test(searchableText) && /\b(up\s*(?:or|\/)?\s*down|up\/down|up|down)\b/u.test(searchableText);
+  return hasBitcoinOrBtcPhrase(rawMarket) && hasExplicitUpDownProductPhrase(rawMarket);
+}
+
+export function hasBitcoinOrBtcPhrase(rawMarket: Record<string, unknown>): boolean {
+  return /\b(bitcoin|btc)\b/u.test(buildSearchableMarketText(rawMarket));
+}
+
+export function hasExplicitUpDownProductPhrase(rawMarket: Record<string, unknown>): boolean {
+  return /\bup\s*(?:(?:-|\s)+or(?:-|\s)+|\/|-|\s+)?down\b/u.test(buildExplicitUpDownProductPhraseSearchableText(rawMarket));
+}
+
+export function hasExplicitUpDownOutcomes(outcomes: string[]): boolean {
+  return outcomes.some((outcome) => isExplicitOutcome(outcome, 'up')) && outcomes.some((outcome) => isExplicitOutcome(outcome, 'down'));
 }
 
 export function detectMarketDuration(rawMarket: Record<string, unknown>): MarketDuration | null {
@@ -273,6 +294,19 @@ function buildSearchableMarketText(rawMarket: Record<string, unknown>): string {
     .filter((value): value is string => typeof value === 'string');
   const eventText = extractNestedText(rawMarket['event']).concat(extractNestedText(rawMarket['events']));
   return [...directText, ...eventText].join(' ').toLowerCase();
+}
+
+function buildExplicitUpDownProductPhraseSearchableText(rawMarket: Record<string, unknown>): string {
+  const directText = [rawMarket['slug'], rawMarket['marketSlug'], rawMarket['question'], rawMarket['title'], rawMarket['description'], rawMarket['rules']]
+    .filter((value): value is string => typeof value === 'string');
+  const eventText = extractEventProductText(rawMarket['event']).concat(extractEventProductText(rawMarket['events']));
+  return [...directText, ...eventText].join(' ').toLowerCase();
+}
+
+function extractEventProductText(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(extractEventProductText);
+  if (!isRecord(value)) return [];
+  return ['slug', 'title', 'description'].flatMap((fieldName) => extractNestedText(value[fieldName]));
 }
 
 function extractNestedText(value: unknown): string[] {
@@ -328,10 +362,14 @@ function extractClobTokenIds(rawMarket: Record<string, unknown>): string[] {
   return [];
 }
 
-function findTokenIdForOutcome(outcomes: string[], tokenIds: string[], desiredOutcome: 'up' | 'down'): string | null {
-  const outcomeIndex = outcomes.findIndex((outcome) => outcome.toLowerCase().includes(desiredOutcome));
-  const fallbackIndex = desiredOutcome === 'up' ? 0 : 1;
-  return tokenIds[outcomeIndex >= 0 ? outcomeIndex : fallbackIndex] ?? null;
+export function findTokenIdForOutcome(outcomes: string[], tokenIds: string[], desiredOutcome: 'up' | 'down'): string | null {
+  const outcomeIndex = outcomes.findIndex((outcome) => isExplicitOutcome(outcome, desiredOutcome));
+  return outcomeIndex >= 0 ? tokenIds[outcomeIndex] ?? null : null;
+}
+
+function isExplicitOutcome(outcome: string, desiredOutcome: 'up' | 'down'): boolean {
+  const normalizedOutcome = outcome.trim().toLowerCase().replaceAll(/\s+/gu, ' ');
+  return normalizedOutcome === desiredOutcome || normalizedOutcome === `bitcoin ${desiredOutcome}` || normalizedOutcome === `btc ${desiredOutcome}`;
 }
 
 function extractTime(rawMarket: Record<string, unknown>, fieldNames: string[]): number | null {

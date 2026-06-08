@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { PolymarketGammaApiAdapter } from '../../src/adapters/polymarketGammaApi.js';
 import { PolymarketClobApiAdapter } from '../../src/adapters/polymarketClobApi.js';
-import { detectMarketDuration, isBitcoinUpDownMarket, isRequestedMarketDuration } from '../../src/adapters/polymarketGammaApi.js';
+import { detectMarketDuration, findTokenIdForOutcome, hasExplicitUpDownOutcomes, isBitcoinUpDownMarket, isRequestedMarketDuration } from '../../src/adapters/polymarketGammaApi.js';
 import { processedMarketSummaryRelativeFilePath, processedMarketsRelativeFilePath, processedPricePointsRelativeFilePath, processedStrategyTrainingRowsRelativeFilePath } from '../../src/application/collectorUseCases.js';
 import { marketSummaryParquetSchema, marketsParquetSchema, pricePointsParquetSchema, rejectedMarketsParquetSchema, strategyTrainingRowsParquetSchema } from '../../src/application/schemas.js';
 import { parseOptions } from '../../src/cli/collector.js';
@@ -120,9 +120,45 @@ describe('market duration discovery filters', () => {
     expect(detectMarketDuration(rawMarket('2026-05-01T00:00:00.000Z', '2026-05-02T00:00:00.000Z', { slug: 'btc-up-down-unknown' }))).toBe('1d');
   });
 
-  it('detects bitcoin up/down text without hardcoding one title format', () => {
-    expect(isBitcoinUpDownMarket({ slug: 'btc-updown-1h', title: 'BTC Up/Down hourly' })).toBe(true);
-    expect(isBitcoinUpDownMarket({ slug: 'eth-updown-1h', title: 'ETH Up/Down hourly' })).toBe(false);
+  it('accepts explicit Bitcoin Up/Down product phrases', () => {
+    expect(isBitcoinUpDownMarket({ slug: 'btc-updown-1h' })).toBe(true);
+    expect(isBitcoinUpDownMarket({ title: 'BTC Up/Down Hourly' })).toBe(true);
+    expect(isBitcoinUpDownMarket({ question: 'Bitcoin Up or Down - target price $100,000' })).toBe(true);
+    expect(isBitcoinUpDownMarket({ slug: 'bitcoin-up-or-down-daily' })).toBe(true);
+    expect(isBitcoinUpDownMarket({ slug: 'btc-up-down-1h' })).toBe(true);
+    expect(isBitcoinUpDownMarket({ title: 'BTC Up Down Hourly' })).toBe(true);
+    expect(isBitcoinUpDownMarket({ slug: 'bitcoin-updown-1h' })).toBe(true);
+  });
+
+  it('rejects standalone up/down Bitcoin wording and non-BTC Up/Down markets', () => {
+    expect(isBitcoinUpDownMarket({ question: 'Will Bitcoin go up to $100,000 today?' })).toBe(false);
+    expect(isBitcoinUpDownMarket({ question: 'Will BTC go down below $90,000?' })).toBe(false);
+    expect(isBitcoinUpDownMarket({ question: 'Will Bitcoin be above $100,000?' })).toBe(false);
+    expect(isBitcoinUpDownMarket({ question: 'Will BTC hit $120k?' })).toBe(false);
+    expect(isBitcoinUpDownMarket({ question: 'Bitcoin higher than $100,000?' })).toBe(false);
+    expect(isBitcoinUpDownMarket({ question: 'Will Bitcoin reach $100,000 today?' })).toBe(false);
+    expect(isBitcoinUpDownMarket({ title: 'ETH Up/Down hourly' })).toBe(false);
+  });
+
+  it('maps token ids only from explicit Up/Down outcomes without Yes/No fallback', () => {
+    expect(findTokenIdForOutcome(['Up', 'Down'], ['up-token', 'down-token'], 'up')).toBe('up-token');
+    expect(findTokenIdForOutcome(['Up', 'Down'], ['up-token', 'down-token'], 'down')).toBe('down-token');
+    expect(findTokenIdForOutcome(['DOWN', 'UP'], ['down-token', 'up-token'], 'up')).toBe('up-token');
+    expect(findTokenIdForOutcome(['DOWN', 'UP'], ['down-token', 'up-token'], 'down')).toBe('down-token');
+    expect(findTokenIdForOutcome(['Yes', 'No'], ['yes-token', 'no-token'], 'up')).toBeNull();
+    expect(findTokenIdForOutcome(['Yes', 'No'], ['yes-token', 'no-token'], 'down')).toBeNull();
+    expect(findTokenIdForOutcome(['Above', 'Below'], ['above-token', 'below-token'], 'up')).toBeNull();
+    expect(findTokenIdForOutcome(['Above', 'Below'], ['above-token', 'below-token'], 'down')).toBeNull();
+  });
+
+  it('validates only explicit Up/Down outcome pairs', () => {
+    expect(hasExplicitUpDownOutcomes(['Up', 'Down'])).toBe(true);
+    expect(hasExplicitUpDownOutcomes(['UP', 'DOWN'])).toBe(true);
+    expect(hasExplicitUpDownOutcomes(['Bitcoin Up', 'Bitcoin Down'])).toBe(true);
+    expect(hasExplicitUpDownOutcomes(['Yes', 'No'])).toBe(false);
+    expect(hasExplicitUpDownOutcomes(['Above', 'Below'])).toBe(false);
+    expect(hasExplicitUpDownOutcomes(['Higher', 'Lower'])).toBe(false);
+    expect(hasExplicitUpDownOutcomes(['Will', "Won't"])).toBe(false);
   });
 
   it('filters by requested duration and lets all accept supported durations', () => {
@@ -144,6 +180,55 @@ describe('market duration discovery filters', () => {
     expect(result.acceptedMarkets[0]?.marketDuration).toBe('1h');
     expect(result.rejectedMarkets.map((market) => market.rejectionReason)).toEqual(['unsupported_duration', 'unknown_duration', 'not_bitcoin_up_down']);
     expect(result.rejectedMarkets[0]?.detectedMarketDuration).toBeNull();
+  });
+
+  it('rejects supported Bitcoin Yes/No markets without explicit Up/Down product phrases', () => {
+    const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([]) as never, 'https://example.test');
+    const result = adapter.parseMarkets([
+      {
+        slug: 'will-bitcoin-go-up-to-100000-today',
+        question: 'Will Bitcoin go up to $100,000 today?',
+        startDate: '2026-05-01T00:00:00.000Z',
+        endDate: '2026-05-01T01:00:00.000Z',
+        outcomes: ['Yes', 'No'],
+        clobTokenIds: ['yes-token', 'no-token'],
+        targetPrice: '100000',
+      },
+    ], '/tmp/raw.json', '1h');
+
+    expect(result.acceptedMarkets).toHaveLength(0);
+    expect(result.rejectedMarkets).toHaveLength(1);
+    expect(result.rejectedMarkets[0]?.rejectionReason).toBe('not_explicit_up_down_product');
+  });
+
+  it('rejects explicit product markets with non-Up/Down outcomes before token mapping', () => {
+    const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([]) as never, 'https://example.test');
+    const result = adapter.parseMarkets([
+      rawMarket('2026-05-01T00:00:00.000Z', '2026-05-01T01:00:00.000Z', {
+        slug: 'bitcoin-updown-1h-yes-no',
+        question: 'Bitcoin Up/Down Hourly - target price $100,000',
+        outcomes: ['Yes', 'No'],
+        clobTokenIds: ['yes-token', 'no-token'],
+      }),
+    ], '/tmp/raw.json', '1h');
+
+    expect(result.acceptedMarkets).toHaveLength(0);
+    expect(result.rejectedMarkets[0]?.rejectionReason).toBe('non_up_down_outcomes');
+    expect(findTokenIdForOutcome(['Yes', 'No'], ['yes-token', 'no-token'], 'up')).toBeNull();
+    expect(findTokenIdForOutcome(['Yes', 'No'], ['yes-token', 'no-token'], 'down')).toBeNull();
+  });
+
+  it('rejects explicit product markets with Up/Down outcomes but missing token ids', () => {
+    const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([]) as never, 'https://example.test');
+    const result = adapter.parseMarkets([
+      rawMarket('2026-05-01T00:00:00.000Z', '2026-05-01T01:00:00.000Z', {
+        slug: 'bitcoin-updown-1h-missing-tokens',
+        clobTokenIds: [],
+      }),
+    ], '/tmp/raw.json', '1h');
+
+    expect(result.acceptedMarkets).toHaveLength(0);
+    expect(result.rejectedMarkets[0]?.rejectionReason).toBe('token_ids_missing');
   });
 
   it('rejects a supported market outside the requested duration as unsupported_duration', () => {
