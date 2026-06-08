@@ -1,6 +1,23 @@
 import { mkdir, readFile, writeFile, access, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
+export async function ensureBaseDataDirectories(dataDirectoryPath = 'data'): Promise<void> {
+  for (const directoryPath of [
+    '',
+    'raw',
+    'raw/gamma',
+    'raw/polymarket-prices',
+    'raw/polymarket-trades',
+    'raw/binance',
+    'processed',
+    'rejected',
+    'state',
+    'logs',
+  ]) {
+    await mkdir(join(dataDirectoryPath, directoryPath), { recursive: true });
+  }
+}
+
 export class FileStorage {
   public constructor(private readonly dataDirectoryPath = 'data') {}
 
@@ -9,18 +26,7 @@ export class FileStorage {
   }
 
   public async ensureDataDirectories(): Promise<void> {
-    for (const directoryPath of [
-      'raw/gamma',
-      'raw/polymarket-prices',
-      'raw/polymarket-trades',
-      'raw/binance',
-      'processed',
-      'rejected',
-      'state',
-      'logs',
-    ]) {
-      await mkdir(this.resolve(directoryPath), { recursive: true });
-    }
+    await ensureBaseDataDirectories(this.dataDirectoryPath);
   }
 
   public resolve(relativeFilePath: string): string {

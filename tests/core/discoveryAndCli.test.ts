@@ -6,7 +6,7 @@ import { PolymarketClobApiAdapter } from '../../src/adapters/polymarketClobApi.j
 import { detectMarketDuration, findTokenIdForOutcome, hasExplicitUpDownOutcomes, isBitcoinUpDownMarket, isRequestedMarketDuration } from '../../src/adapters/polymarketGammaApi.js';
 import { processedMarketSummaryRelativeFilePath, processedMarketsRelativeFilePath, processedPricePointsRelativeFilePath, processedStrategyTrainingRowsRelativeFilePath } from '../../src/application/collectorUseCases.js';
 import { marketSummaryParquetSchema, marketsParquetSchema, pricePointsParquetSchema, rejectedMarketsParquetSchema, strategyTrainingRowsParquetSchema } from '../../src/application/schemas.js';
-import { parseOptions } from '../../src/cli/collector.js';
+import { parseOptions } from '../../src/cli/createCollectorProgram.js';
 
 class MockHttpClient {
   public urls: URL[] = [];
