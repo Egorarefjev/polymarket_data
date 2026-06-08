@@ -7,7 +7,6 @@ export async function ensureBaseDataDirectories(dataDirectoryPath = 'data'): Pro
     'raw',
     'raw/gamma',
     'raw/polymarket-prices',
-    'raw/polymarket-trades',
     'raw/binance',
     'processed',
     'rejected',

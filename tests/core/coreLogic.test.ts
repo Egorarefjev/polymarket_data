@@ -8,9 +8,21 @@ import { validateMarketForAnalysis } from '../../src/core/validation.js';
 import { buildMarketSummary } from '../../src/core/summary.js';
 import { CausalAsOfPriceLookup, buildNormalizedPricePointsForMarket, buildNormalizedPricePointsForMarketWithSkipCount, buildPriceHistoryQualityFlags, findLatestBinancePricePointAtOrBeforeTimestamp, findLatestExternalPricePointAtOrBeforeTimestamp } from '../../src/core/alignment.js';
 import { ChainlinkLocalFilePriceSource, parseChainlinkLocalFilePricePoints } from '../../src/adapters/externalPriceSource.js';
+import { buildArchiveFileName, buildArchiveUrl } from '../../src/adapters/binanceArchiveApi.js';
 import { FileStorage } from '../../src/adapters/fileStorage.js';
 import { CollectorUseCases, type CollectorOptions, rawBinanceRelativeFilePath, rawPriceHistoryRelativeFilePath, acceptedMarketsRelativeFilePath, processedPricePointsDebugRelativeFilePath, processedStrategyTrainingRowsDebugRelativeFilePath, processedMarketSummaryRelativeFilePath, shouldDownloadBinanceDuringFullPipeline, determinePrimaryPriceMode, buildStrategyTrainingRows } from '../../src/application/collectorUseCases.js';
 import type { NormalizedMarket, NormalizedPricePoint } from '../../src/core/domain.js';
+
+
+describe('Binance archive URLs', () => {
+  it('builds daily archive filenames and URLs in Binance public data format', () => {
+    expect(buildArchiveFileName('BTCUSDT', 'klines', '2026-05-01')).toBe('BTCUSDT-1m-2026-05-01.zip');
+    expect(buildArchiveFileName('BTCUSDT', 'aggTrades', '2026-05-01')).toBe('BTCUSDT-aggTrades-2026-05-01.zip');
+    expect(String(buildArchiveUrl('https://data.binance.vision', 'spot', 'klines', 'BTCUSDT', buildArchiveFileName('BTCUSDT', 'klines', '2026-05-01')))).toBe('https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-05-01.zip');
+    expect(String(buildArchiveUrl('https://data.binance.vision', 'futures', 'klines', 'BTCUSDT', buildArchiveFileName('BTCUSDT', 'klines', '2026-05-01')))).toBe('https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2026-05-01.zip');
+    expect(String(buildArchiveUrl('https://data.binance.vision', 'spot', 'aggTrades', 'BTCUSDT', buildArchiveFileName('BTCUSDT', 'aggTrades', '2026-05-01')))).toBe('https://data.binance.vision/data/spot/daily/aggTrades/BTCUSDT/BTCUSDT-aggTrades-2026-05-01.zip');
+  });
+});
 
 describe('core calculations', () => {
   it('normalizes seconds, milliseconds, and microseconds to milliseconds', () => {
@@ -449,6 +461,8 @@ describe('full pipeline Binance download decision', () => {
     includeBinanceSecondarySignal: false,
     allowProxyPrimaryPriceSourceForDebug: false,
     writeDebugJson: false,
+    allowBroadGammaDateScan: false,
+    allowEmptyMarketSet: false,
   };
 
   function makePipelineUseCases(): CollectorUseCases {
@@ -473,7 +487,8 @@ describe('full pipeline Binance download decision', () => {
     const useCases = makePipelineUseCases();
     vi.spyOn(useCases, 'discoverMarkets').mockResolvedValue(undefined);
     vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
-    vi.spyOn(useCases, 'downloadPolymarketTrades').mockResolvedValue(undefined);
+    vi.spyOn(useCases as unknown as { readAcceptedMarkets: () => Promise<unknown[]> }, 'readAcceptedMarkets').mockResolvedValue([{}]);
+    const tradesSpy = vi.spyOn(useCases, 'downloadPolymarketTrades');
     const downloadBinanceSpy = vi.spyOn(useCases, 'downloadBinance').mockResolvedValue(undefined);
     vi.spyOn(useCases, 'buildDataset').mockResolvedValue({ pricePoints: [], strategyTrainingRows: [] });
     vi.spyOn(useCases, 'summarizeMarkets').mockResolvedValue(undefined);
@@ -481,13 +496,15 @@ describe('full pipeline Binance download decision', () => {
     await useCases.runFullPipeline({ ...baseOptions, allowProxyPrimaryPriceSourceForDebug: true, includeBinanceSecondarySignal: false });
 
     expect(downloadBinanceSpy).toHaveBeenCalledTimes(1);
+    expect(tradesSpy).not.toHaveBeenCalled();
   });
 
   it('runFullPipeline does not download Binance when Chainlink input exists and secondary signal is disabled', async () => {
     const useCases = makePipelineUseCases();
     vi.spyOn(useCases, 'discoverMarkets').mockResolvedValue(undefined);
     vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
-    vi.spyOn(useCases, 'downloadPolymarketTrades').mockResolvedValue(undefined);
+    vi.spyOn(useCases as unknown as { readAcceptedMarkets: () => Promise<unknown[]> }, 'readAcceptedMarkets').mockResolvedValue([{}]);
+    const tradesSpy = vi.spyOn(useCases, 'downloadPolymarketTrades');
     const downloadBinanceSpy = vi.spyOn(useCases, 'downloadBinance').mockResolvedValue(undefined);
     vi.spyOn(useCases, 'buildDataset').mockResolvedValue({ pricePoints: [], strategyTrainingRows: [] });
     vi.spyOn(useCases, 'summarizeMarkets').mockResolvedValue(undefined);
@@ -495,13 +512,15 @@ describe('full pipeline Binance download decision', () => {
     await useCases.runFullPipeline({ ...baseOptions, allowProxyPrimaryPriceSourceForDebug: true, includeBinanceSecondarySignal: false, chainlinkInputFile: './chainlink.jsonl' });
 
     expect(downloadBinanceSpy).not.toHaveBeenCalled();
+    expect(tradesSpy).not.toHaveBeenCalled();
   });
 
   it('runFullPipeline downloads Binance when Chainlink input exists and secondary signal is enabled', async () => {
     const useCases = makePipelineUseCases();
     vi.spyOn(useCases, 'discoverMarkets').mockResolvedValue(undefined);
     vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
-    vi.spyOn(useCases, 'downloadPolymarketTrades').mockResolvedValue(undefined);
+    vi.spyOn(useCases as unknown as { readAcceptedMarkets: () => Promise<unknown[]> }, 'readAcceptedMarkets').mockResolvedValue([{}]);
+    const tradesSpy = vi.spyOn(useCases, 'downloadPolymarketTrades');
     const downloadBinanceSpy = vi.spyOn(useCases, 'downloadBinance').mockResolvedValue(undefined);
     vi.spyOn(useCases, 'buildDataset').mockResolvedValue({ pricePoints: [], strategyTrainingRows: [] });
     vi.spyOn(useCases, 'summarizeMarkets').mockResolvedValue(undefined);
@@ -509,6 +528,32 @@ describe('full pipeline Binance download decision', () => {
     await useCases.runFullPipeline({ ...baseOptions, includeBinanceSecondarySignal: true, chainlinkInputFile: './chainlink.jsonl' });
 
     expect(downloadBinanceSpy).toHaveBeenCalledTimes(1);
+    expect(tradesSpy).not.toHaveBeenCalled();
+  });
+
+
+  it('runFullPipeline stops after discovery when no markets are accepted by default', async () => {
+    const useCases = makePipelineUseCases();
+    vi.spyOn(useCases, 'discoverMarkets').mockResolvedValue(undefined);
+    vi.spyOn(useCases as unknown as { readAcceptedMarkets: () => Promise<unknown[]> }, 'readAcceptedMarkets').mockResolvedValue([]);
+    const pricesSpy = vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
+    const binanceSpy = vi.spyOn(useCases, 'downloadBinance').mockResolvedValue(undefined);
+
+    await expect(useCases.runFullPipeline({ ...baseOptions, allowProxyPrimaryPriceSourceForDebug: true })).rejects.toThrow('No BTC Up/Down markets accepted');
+    expect(pricesSpy).not.toHaveBeenCalled();
+    expect(binanceSpy).not.toHaveBeenCalled();
+  });
+
+  it('runFullPipeline can continue with an empty accepted set only when explicitly allowed', async () => {
+    const useCases = makePipelineUseCases();
+    vi.spyOn(useCases, 'discoverMarkets').mockResolvedValue(undefined);
+    vi.spyOn(useCases as unknown as { readAcceptedMarkets: () => Promise<unknown[]> }, 'readAcceptedMarkets').mockResolvedValue([]);
+    const pricesSpy = vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'downloadBinance').mockResolvedValue(undefined);
+    vi.spyOn(useCases, 'buildDataset').mockResolvedValue({ pricePoints: [], strategyTrainingRows: [] });
+
+    await useCases.runFullPipeline({ ...baseOptions, allowEmptyMarketSet: true });
+    expect(pricesSpy).toHaveBeenCalledTimes(1);
   });
 
   it('determinePrimaryPriceMode refuses empty Chainlink fallback and selects proxy only without Chainlink input', () => {
@@ -535,6 +580,8 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
     includeBinanceSecondarySignal: false,
     allowProxyPrimaryPriceSourceForDebug: false,
     writeDebugJson: true,
+    allowBroadGammaDateScan: false,
+    allowEmptyMarketSet: false,
   };
 
   function makeMemoryLogger(): { logger: { info: (payload: Record<string, unknown>, message: string) => void; warn: () => void; error: () => void; debug: () => void }; infoEntries: Array<{ payload: Record<string, unknown>; message: string }> } {
@@ -773,8 +820,9 @@ describe('dataset build with Chainlink input and proxy guardrails', () => {
       await fileStorage.writeJson(processedStrategyTrainingRowsDebugRelativeFilePath(seededOptions), [{ stale: true }], true);
       vi.spyOn(useCases, 'discoverMarkets').mockResolvedValue(undefined);
       vi.spyOn(useCases, 'downloadPolymarketPrices').mockResolvedValue(undefined);
-      vi.spyOn(useCases, 'downloadPolymarketTrades').mockResolvedValue(undefined);
+      const tradesSpy = vi.spyOn(useCases, 'downloadPolymarketTrades');
       await useCases.runFullPipeline(seededOptions);
+      expect(tradesSpy).not.toHaveBeenCalled();
       expect(await fileStorage.exists(processedPricePointsDebugRelativeFilePath(seededOptions))).toBe(false);
       expect(await fileStorage.exists(processedStrategyTrainingRowsDebugRelativeFilePath(seededOptions))).toBe(false);
       expect(parquetWrites.some((write) => write.filePath === fileStorage.resolve(processedMarketSummaryRelativeFilePath(seededOptions)) && write.rowCount === 1)).toBe(true);

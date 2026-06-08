@@ -76,6 +76,8 @@ export function parseOptions(rawOptions: Record<string, unknown>): CollectorOpti
   const includeBinanceSecondarySignal = String(rawOptions['includeBinanceSecondarySignal']).toLowerCase() !== 'false';
   const allowProxyPrimaryPriceSourceForDebug = String(rawOptions['allowProxyPrimaryPriceSourceForDebug']).toLowerCase() === 'true';
   const writeDebugJson = String(rawOptions['writeDebugJson']).toLowerCase() === 'true';
+  const allowBroadGammaDateScan = String(rawOptions['allowBroadGammaDateScan']).toLowerCase() === 'true';
+  const allowEmptyMarketSet = String(rawOptions['allowEmptyMarketSet']).toLowerCase() === 'true';
   const chainlinkInputFile = rawOptions['chainlinkInputFile'] === undefined ? undefined : String(rawOptions['chainlinkInputFile']);
   const options: CollectorOptions = {
     startDate,
@@ -92,6 +94,8 @@ export function parseOptions(rawOptions: Record<string, unknown>): CollectorOpti
     includeBinanceSecondarySignal,
     allowProxyPrimaryPriceSourceForDebug,
     writeDebugJson,
+    allowBroadGammaDateScan,
+    allowEmptyMarketSet,
   };
   if (chainlinkInputFile !== undefined) options.chainlinkInputFile = chainlinkInputFile;
   return options;
@@ -128,7 +132,9 @@ function addSharedOptions(command: Command): Command {
     .option('--binance-data-type <type>', 'aggTrades or klines', 'klines')
     .option('--primary-price-source <source>', 'Primary analytical price source: chainlink', 'chainlink')
     .option('--include-binance-secondary-signal <trueOrFalse>', 'Include Binance as optional secondary predictive signal', 'false')
-    .option('--write-debug-json <trueOrFalse>', 'Write large debug JSON mirrors for small sample runs only', 'false');
+    .option('--write-debug-json <trueOrFalse>', 'Write large debug JSON mirrors for small sample runs only', 'false')
+    .option('--allow-broad-gamma-date-scan <trueOrFalse>', 'Debug only: allow broad Gamma date scan fallback when query discovery returns zero candidates', 'false')
+    .option('--allow-empty-market-set <trueOrFalse>', 'Debug only: continue all pipeline when discovery accepts zero markets', 'false');
 }
 
 async function runDoctorAction(dependencies: CollectorCliDependencies, logger: CollectorCliLogger): Promise<void> {
@@ -195,6 +201,8 @@ function defaultDoctorOptions(): Record<string, unknown> {
     includeBinanceSecondarySignal: 'false',
     allowProxyPrimaryPriceSourceForDebug: 'false',
     writeDebugJson: 'false',
+    allowBroadGammaDateScan: 'false',
+    allowEmptyMarketSet: 'false',
   };
 }
 

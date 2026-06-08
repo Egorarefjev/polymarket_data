@@ -29,12 +29,12 @@ export class BinanceArchiveApiAdapter {
   }
 }
 
-function buildArchiveFileName(symbol: string, dataType: BinanceDataType, date: string): string {
-  const intervalSuffix = dataType === 'klines' ? '-1m' : '';
-  return `${symbol}-${dataType}${intervalSuffix}-${date}.zip`;
+export function buildArchiveFileName(symbol: string, dataType: BinanceDataType, date: string): string {
+  if (dataType === 'klines') return `${symbol}-1m-${date}.zip`;
+  return `${symbol}-aggTrades-${date}.zip`;
 }
 
-function buildArchiveUrl(baseUrl: string, marketType: BinanceMarketType, dataType: BinanceDataType, symbol: string, archiveFileName: string): URL {
+export function buildArchiveUrl(baseUrl: string, marketType: BinanceMarketType, dataType: BinanceDataType, symbol: string, archiveFileName: string): URL {
   const marketRoot = marketType === 'spot' ? 'spot' : 'futures/um';
   const dataPath = dataType === 'klines' ? `klines/${symbol}/1m` : `${dataType}/${symbol}`;
   return new URL(`/data/${marketRoot}/daily/${dataPath}/${archiveFileName}`, baseUrl);
