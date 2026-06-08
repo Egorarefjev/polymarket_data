@@ -185,6 +185,8 @@ Possible flags include:
 - `unsupported_duration`
 - `unknown_duration`
 - `not_bitcoin_up_down`
+- `not_explicit_up_down_product`
+- `non_up_down_outcomes`
 - `invalid_market_time_range`
 - `market_parsing_error:<message>`
 - `price_history_empty`
