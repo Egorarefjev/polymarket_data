@@ -1,6 +1,8 @@
 export type MarketOutcome = 'Up' | 'Down' | 'Yes' | 'No' | 'Unknown';
 export type MarketWinner = 'up' | 'down' | 'unknown' | null;
 export type MarketDuration = '1h' | '4h' | '1d';
+export type UnsupportedMarketDuration = '15m' | '5m';
+export type DetectedMarketDuration = MarketDuration | UnsupportedMarketDuration;
 export type RequestedMarketDuration = MarketDuration | 'all';
 export type ExternalPriceSourceName = 'chainlink' | 'binance' | string;
 export type PrimaryPriceSourceName = 'chainlink' | 'binance_proxy';
@@ -30,7 +32,7 @@ export interface RejectedMarket {
   rejectionReason: string;
   rawMarketFilePath: string;
   dataQualityFlags: string[];
-  detectedMarketDuration?: MarketDuration | null;
+  detectedMarketDuration?: DetectedMarketDuration | null;
 }
 
 export interface PriceHistoryPoint {

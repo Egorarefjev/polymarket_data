@@ -1,4 +1,4 @@
-import type { MarketDuration, NormalizedMarket, RejectedMarket, RequestedMarketDuration } from '../core/domain.js';
+import type { DetectedMarketDuration, MarketDuration, NormalizedMarket, RejectedMarket, RequestedMarketDuration } from '../core/domain.js';
 import { determineMarketWinner, extractTargetPrice, parseOutcomePrices, parseOutcomes } from '../core/parsing.js';
 import { normalizeTimestampMilliseconds } from '../core/calculations.js';
 import { validateMarketForAnalysis } from '../core/validation.js';
@@ -13,6 +13,35 @@ export interface GammaDiscoveryResult {
 
 export interface GammaDiscoveryOptions {
   allowBroadGammaDateScan?: boolean;
+  requestedMarketDuration?: RequestedMarketDuration;
+}
+
+export interface GammaDiscoveryDebugQuery {
+  source: GammaDiscoverySource;
+  queryTerm: string;
+  url: string;
+  rawItemsFetched: number;
+  candidateMarketsExtracted: number;
+  locallyMatchedMarkets: number;
+  acceptedMarketsFromThisQuery: number;
+  rejectedMarketsFromThisQuery: number;
+  extractedCandidates: { conditionId?: string | null; marketSlug: string | null; question: string | null; detectedMarketDuration?: DetectedMarketDuration | null; rejectionReason?: string | null }[];
+  error?: string;
+}
+
+export interface GammaDiscoveryDebug {
+  startDate: string;
+  endDate: string;
+  requestedMarketDuration: RequestedMarketDuration;
+  rawResponsesFetched: number;
+  candidateMarketsFetched: number;
+  deduplicatedCandidateMarkets: number;
+  locallyMatchedMarkets: number;
+  acceptedMarkets: number;
+  rejectedMarkets: number;
+  acceptedByDuration: Record<MarketDuration, number>;
+  rejectedByReason: Record<string, number>;
+  queries: GammaDiscoveryDebugQuery[];
 }
 
 interface GammaDiscoveryPageResult {
@@ -23,21 +52,76 @@ interface GammaDiscoveryPageResult {
   latestFetchedEndDate: string | null;
 }
 
-const BTC_UP_DOWN_SEARCH_TERMS = ['bitcoin up down', 'btc up down', 'bitcoin up or down', 'btc updown', 'bitcoin updown'] as const;
-const GAMMA_SEARCH_PARAMETER_NAMES = ['query', 'q', 'search', 'slug'] as const;
+type GammaDiscoverySource = 'public-search' | 'events' | 'series' | 'markets';
+
+const GAMMA_SEARCH_PARAMETER_NAMES = ['q', 'query', 'search'] as const;
+const MARKET_SEARCH_PARAMETER_NAMES = ['q', 'query', 'search', 'slug'] as const;
+const SUPPORTED_MARKET_DURATIONS: MarketDuration[] = ['1h', '4h', '1d'];
+const EMPTY_ACCEPTED_BY_DURATION: Record<MarketDuration, number> = { '1h': 0, '4h': 0, '1d': 0 };
+const EMPTY_REJECTED_BY_REASON: Record<string, number> = {
+  unsupported_duration: 0,
+  unknown_duration: 0,
+  not_explicit_up_down_product: 0,
+  non_up_down_outcomes: 0,
+  target_price_missing: 0,
+  token_ids_missing: 0,
+};
+
+const DURATION_SEARCH_TERMS: Record<MarketDuration, readonly string[]> = {
+  '1h': ['btc updown 1h', 'bitcoin updown 1h', 'btc up down 1 hour', 'bitcoin up or down hourly', 'bitcoin up down hourly', 'btc up/down hourly', 'bitcoin up or down 1h', 'btc-updown-1h', 'bitcoin-updown-1h'],
+  '4h': ['btc updown 4h', 'bitcoin updown 4h', 'btc up down 4 hour', 'bitcoin up or down 4 hour', 'bitcoin up down 4h', 'btc up/down 4h', 'bitcoin up or down four hour', 'btc-updown-4h', 'bitcoin-updown-4h'],
+  '1d': ['btc updown daily', 'bitcoin updown daily', 'btc up down daily', 'bitcoin up or down daily', 'bitcoin up down 1d', 'btc up/down daily', 'bitcoin up or down day', 'btc-updown-1d', 'bitcoin-updown-1d', 'btc-updown-daily', 'bitcoin-updown-daily'],
+};
+
+export function durationSpecificBitcoinUpDownSearchTerms(requestedDuration: RequestedMarketDuration): string[] {
+  const durations = requestedDuration === 'all' ? SUPPORTED_MARKET_DURATIONS : [requestedDuration];
+  return [...new Set(durations.flatMap((duration) => DURATION_SEARCH_TERMS[duration]))];
+}
 
 export class PolymarketGammaApiAdapter {
+  private lastDiscoveryDebug: GammaDiscoveryDebug | null = null;
+
   public constructor(
     private readonly httpClient: PublicHttpClient,
     private readonly baseUrl = 'https://gamma-api.polymarket.com',
   ) {}
 
+  public getLastDiscoveryDebug(): GammaDiscoveryDebug | null {
+    return this.lastDiscoveryDebug;
+  }
+
+  public attachParseResultsToLastDiscoveryDebug(discoveryResult: GammaDiscoveryResult): GammaDiscoveryDebug | null {
+    if (this.lastDiscoveryDebug === null) return null;
+    const acceptedByKey = new Map(discoveryResult.acceptedMarkets.map((market) => [normalizedDeduplicationKey(market.conditionId, market.marketSlug, market.question), market]));
+    const rejectedByKey = new Map(discoveryResult.rejectedMarkets.map((market) => [normalizedDeduplicationKey(market.conditionId, market.marketSlug, market.question), market]));
+    const acceptedByDuration = { ...EMPTY_ACCEPTED_BY_DURATION };
+    const rejectedByReason = { ...EMPTY_REJECTED_BY_REASON };
+    for (const market of discoveryResult.acceptedMarkets) acceptedByDuration[market.marketDuration] += 1;
+    for (const market of discoveryResult.rejectedMarkets) rejectedByReason[market.rejectionReason] = (rejectedByReason[market.rejectionReason] ?? 0) + 1;
+    const queries = this.lastDiscoveryDebug.queries.map((query) => {
+      let acceptedMarketsFromThisQuery = 0;
+      let rejectedMarketsFromThisQuery = 0;
+      const extractedCandidates = query.extractedCandidates.map((candidate) => {
+        const key = normalizedDeduplicationKey(candidate.conditionId ?? null, candidate.marketSlug, candidate.question);
+        const accepted = acceptedByKey.get(key);
+        const rejected = rejectedByKey.get(key);
+        if (accepted !== undefined) acceptedMarketsFromThisQuery += 1;
+        if (rejected !== undefined) rejectedMarketsFromThisQuery += 1;
+        return { ...candidate, detectedMarketDuration: accepted?.marketDuration ?? rejected?.detectedMarketDuration ?? candidate.detectedMarketDuration ?? null, rejectionReason: rejected?.rejectionReason ?? null };
+      });
+      return { ...query, acceptedMarketsFromThisQuery, rejectedMarketsFromThisQuery, extractedCandidates };
+    });
+    this.lastDiscoveryDebug = { ...this.lastDiscoveryDebug, acceptedMarkets: discoveryResult.acceptedMarkets.length, rejectedMarkets: discoveryResult.rejectedMarkets.length, acceptedByDuration, rejectedByReason, queries };
+    return this.lastDiscoveryDebug;
+  }
+
   public async discoverBitcoinUpDownMarkets(startDate: string, endDate: string, options: GammaDiscoveryOptions = {}): Promise<Record<string, unknown>[]> {
-    const searchDiscovery = await this.discoverWithSearchQueries(startDate, endDate);
-    let discovery = searchDiscovery;
+    const requestedMarketDuration = options.requestedMarketDuration ?? '1h';
+    const searchDiscovery = await this.discoverWithDurationSpecificQueries(startDate, endDate, requestedMarketDuration);
+    let discovery: GammaDiscoveryPageResult = searchDiscovery;
     if (searchDiscovery.markets.length === 0) {
       // eslint-disable-next-line no-console
-      console.warn(JSON.stringify({ dataQualityFlag: 'gamma_search_returned_zero_candidates', startDate, endDate }));
+      console.warn(JSON.stringify({ dataQualityFlag: 'gamma_search_returned_zero_candidates', startDate, endDate, requestedMarketDuration }));
       if (options.allowBroadGammaDateScan === true) {
         // eslint-disable-next-line no-console
         console.warn(JSON.stringify({ dataQualityFlag: 'broad_gamma_date_scan_enabled', startDate, endDate }));
@@ -47,45 +131,45 @@ export class PolymarketGammaApiAdapter {
     }
     if (!doesFetchedRangeCoverRequestedRange(discovery.earliestFetchedEndDate, discovery.latestFetchedEndDate, startDate, endDate) && discovery.rawMarketsFetched > 0) {
       // eslint-disable-next-line no-console
-      console.warn(JSON.stringify({
-        dataQualityFlag: 'gamma_discovery_fetched_range_does_not_cover_requested_range',
-        requestedStartDate: `${startDate}T00:00:00.000Z`,
-        requestedEndDate: `${endDate}T00:00:00.000Z`,
-        earliestFetchedEndDate: discovery.earliestFetchedEndDate,
-        latestFetchedEndDate: discovery.latestFetchedEndDate,
-      }));
+      console.warn(JSON.stringify({ dataQualityFlag: 'gamma_discovery_fetched_range_does_not_cover_requested_range', requestedStartDate: `${startDate}T00:00:00.000Z`, requestedEndDate: `${endDate}T00:00:00.000Z`, earliestFetchedEndDate: discovery.earliestFetchedEndDate, latestFetchedEndDate: discovery.latestFetchedEndDate }));
     }
     const locallyMatchedMarkets = discovery.markets.filter(isBitcoinUpDownMarket).length;
+    this.lastDiscoveryDebug = { ...searchDiscovery.debug, candidateMarketsFetched: searchDiscovery.rawMarketsFetched, deduplicatedCandidateMarkets: discovery.markets.length, locallyMatchedMarkets };
     // eslint-disable-next-line no-console
-    console.info(JSON.stringify({
-      pagesFetched: discovery.pagesFetched,
-      rawMarketsFetched: discovery.rawMarketsFetched,
-      candidateMarketsFetched: discovery.markets.length,
-      locallyMatchedMarkets,
-      matchingMarketsFound: locallyMatchedMarkets,
-      earliestFetchedEndDate: discovery.earliestFetchedEndDate,
-      latestFetchedEndDate: discovery.latestFetchedEndDate,
-    }));
+    console.info(JSON.stringify({ pagesFetched: discovery.pagesFetched, rawResponsesFetched: this.lastDiscoveryDebug.rawResponsesFetched, rawMarketsFetched: discovery.rawMarketsFetched, candidateMarketsFetched: discovery.rawMarketsFetched, deduplicatedCandidateMarkets: discovery.markets.length, locallyMatchedMarkets, matchingMarketsFound: locallyMatchedMarkets, acceptedByDuration: this.lastDiscoveryDebug.acceptedByDuration, rejectedByReason: this.lastDiscoveryDebug.rejectedByReason, earliestFetchedEndDate: discovery.earliestFetchedEndDate, latestFetchedEndDate: discovery.latestFetchedEndDate }));
     return discovery.markets;
   }
 
-  private async discoverWithSearchQueries(startDate: string, endDate: string): Promise<GammaDiscoveryPageResult> {
+  private async discoverWithDurationSpecificQueries(startDate: string, endDate: string, requestedMarketDuration: RequestedMarketDuration): Promise<GammaDiscoveryPageResult & { debug: GammaDiscoveryDebug }> {
     const deduplicatedCandidates = new Map<string, Record<string, unknown>>();
     let pagesFetched = 0;
     let rawMarketsFetched = 0;
+    let rawResponsesFetched = 0;
     let earliestFetchedEndTimestamp: number | null = null;
     let latestFetchedEndTimestamp: number | null = null;
-    for (const searchTerm of BTC_UP_DOWN_SEARCH_TERMS) {
-      for (const searchParameterName of GAMMA_SEARCH_PARAMETER_NAMES) {
-        try {
-          const discovery = await this.discoverWithOffsetPagination(startDate, endDate, { searchParameterName, searchTerm, candidateOnly: true });
-          pagesFetched += discovery.pagesFetched;
-          rawMarketsFetched += discovery.rawMarketsFetched;
-          earliestFetchedEndTimestamp = minNullableTimestamp(earliestFetchedEndTimestamp, discovery.earliestFetchedEndDate);
-          latestFetchedEndTimestamp = maxNullableTimestamp(latestFetchedEndTimestamp, discovery.latestFetchedEndDate);
-          for (const market of discovery.markets) deduplicatedCandidates.set(deduplicationKey(market), market);
-        } catch {
-          // Keep trying other Gamma search parameter names because API support has varied over time.
+    const queries: GammaDiscoveryDebugQuery[] = [];
+    for (const source of ['public-search', 'events', 'series', 'markets'] as const) {
+      for (const searchTerm of durationSpecificBitcoinUpDownSearchTerms(requestedMarketDuration)) {
+        for (const url of this.discoveryUrls(source, searchTerm, startDate, endDate)) {
+          try {
+            const rawResponse = await this.httpClient.getJson<unknown>(url);
+            rawResponsesFetched += 1;
+            pagesFetched += 1;
+            const rawItems = topLevelItems(rawResponse);
+            const candidates = extractCandidateMarkets(rawResponse).filter(isBitcoinUpDownMarket);
+            rawMarketsFetched += candidates.length;
+            for (const rawMarket of candidates) {
+              const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']);
+              if (endTimestamp !== null) {
+                earliestFetchedEndTimestamp = earliestFetchedEndTimestamp === null ? endTimestamp : Math.min(earliestFetchedEndTimestamp, endTimestamp);
+                latestFetchedEndTimestamp = latestFetchedEndTimestamp === null ? endTimestamp : Math.max(latestFetchedEndTimestamp, endTimestamp);
+              }
+              deduplicatedCandidates.set(deduplicationKey(rawMarket), rawMarket);
+            }
+            queries.push(buildDebugQuery(source, searchTerm, url, rawItems.length, candidates));
+          } catch (error) {
+            queries.push({ source, queryTerm: searchTerm, url: url.toString(), rawItemsFetched: 0, candidateMarketsExtracted: 0, locallyMatchedMarkets: 0, acceptedMarketsFromThisQuery: 0, rejectedMarketsFromThisQuery: 0, extractedCandidates: [], error: (error as Error).message });
+          }
         }
       }
     }
@@ -95,9 +179,24 @@ export class PolymarketGammaApiAdapter {
       rawMarketsFetched,
       earliestFetchedEndDate: earliestFetchedEndTimestamp === null ? null : new Date(earliestFetchedEndTimestamp).toISOString(),
       latestFetchedEndDate: latestFetchedEndTimestamp === null ? null : new Date(latestFetchedEndTimestamp).toISOString(),
+      debug: { startDate, endDate, requestedMarketDuration, rawResponsesFetched, candidateMarketsFetched: rawMarketsFetched, deduplicatedCandidateMarkets: deduplicatedCandidates.size, locallyMatchedMarkets: [...deduplicatedCandidates.values()].filter(isBitcoinUpDownMarket).length, acceptedMarkets: 0, rejectedMarkets: 0, acceptedByDuration: { ...EMPTY_ACCEPTED_BY_DURATION }, rejectedByReason: { ...EMPTY_REJECTED_BY_REASON }, queries },
     };
   }
 
+  private discoveryUrls(source: GammaDiscoverySource, searchTerm: string, startDate: string, endDate: string): URL[] {
+    const endpoint = source === 'public-search' ? '/public-search' : source === 'events' ? '/events' : source === 'series' ? '/series' : '/markets';
+    const parameterNames = source === 'markets' ? MARKET_SEARCH_PARAMETER_NAMES : GAMMA_SEARCH_PARAMETER_NAMES;
+    return parameterNames.map((parameterName) => {
+      const url = new URL(endpoint, this.baseUrl);
+      url.searchParams.set(parameterName, searchTerm);
+      if (source === 'events' || source === 'markets') setGammaDateFilterSearchParams(url, startDate, endDate);
+      if (source === 'markets') {
+        url.searchParams.set('limit', '500');
+        url.searchParams.set('offset', '0');
+      }
+      return url;
+    });
+  }
   private async tryDiscoverWithKeysetPagination(startDate: string, endDate: string): Promise<GammaDiscoveryPageResult | null> {
     const allRawMarkets: Record<string, unknown>[] = [];
     const limit = 500;
@@ -204,7 +303,7 @@ export class PolymarketGammaApiAdapter {
           rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, rejectionReason, null, [rejectionReason]));
           continue;
         }
-        if (!isRequestedMarketDuration(detectedMarketDuration, requestedMarketDuration)) {
+        if (!isSupportedMarketDuration(detectedMarketDuration) || !isRequestedMarketDuration(detectedMarketDuration, requestedMarketDuration)) {
           rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, 'unsupported_duration', detectedMarketDuration, ['unsupported_duration']));
           continue;
         }
@@ -306,11 +405,13 @@ export function hasExplicitUpDownOutcomes(outcomes: string[]): boolean {
   return outcomes.some((outcome) => isExplicitOutcome(outcome, 'up')) && outcomes.some((outcome) => isExplicitOutcome(outcome, 'down'));
 }
 
-export function detectMarketDuration(rawMarket: Record<string, unknown>): MarketDuration | null {
+export function detectMarketDuration(rawMarket: Record<string, unknown>): DetectedMarketDuration | null {
   const timestampDuration = detectMarketDurationFromTimestamps(rawMarket);
   if (timestampDuration !== null) return timestampDuration;
 
   const searchableText = buildSearchableMarketText(rawMarket);
+  if (/\b(15m|15\s*m|15-min|15\s*min|15\s*minute|fifteen\s*minute)\b/u.test(searchableText)) return '15m';
+  if (/\b(5m|5\s*m|5-min|5\s*min|5\s*minute|five\s*minute)\b/u.test(searchableText)) return '5m';
   if (/\b(1h|1\s*h|one\s*hour|hourly|hour-long|1-hour|1\s*hour)\b/u.test(searchableText)) return '1h';
   if (/\b(4h|4\s*h|four\s*hour|four-hour|4-hour|4\s*hour)\b/u.test(searchableText)) return '4h';
   if (/\b(1d|1\s*d|daily|day-long|1-day|1\s*day|24h|24\s*h|24-hour|24\s*hour)\b/u.test(searchableText)) return '1d';
@@ -321,17 +422,23 @@ export function isRequestedMarketDuration(detectedDuration: MarketDuration | nul
   return detectedDuration !== null && (requestedDuration === 'all' || detectedDuration === requestedDuration);
 }
 
-function hasUnsupportedDurationSignal(rawMarket: Record<string, unknown>): boolean {
-  if (detectUnsupportedDurationFromTimestamps(rawMarket)) return true;
-  return /\b(5m|5\s*m|5-min|5\s*min|5\s*minute|five\s*minute)\b/u.test(buildSearchableMarketText(rawMarket));
+function isSupportedMarketDuration(detectedDuration: DetectedMarketDuration): detectedDuration is MarketDuration {
+  return detectedDuration === '1h' || detectedDuration === '4h' || detectedDuration === '1d';
 }
 
-function detectMarketDurationFromTimestamps(rawMarket: Record<string, unknown>): MarketDuration | null {
+function hasUnsupportedDurationSignal(rawMarket: Record<string, unknown>): boolean {
+  if (detectUnsupportedDurationFromTimestamps(rawMarket)) return true;
+  return /\b(15m|15\s*m|15-min|15\s*min|15\s*minute|fifteen\s*minute|5m|5\s*m|5-min|5\s*min|5\s*minute|five\s*minute)\b/u.test(buildSearchableMarketText(rawMarket));
+}
+
+function detectMarketDurationFromTimestamps(rawMarket: Record<string, unknown>): DetectedMarketDuration | null {
   const startTimestamp = extractTime(rawMarket, ['startDate', 'startDateIso', 'gameStartTime', 'eventStartTime', 'startTime']);
   const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']);
   if (startTimestamp === null || endTimestamp === null) return null;
   const durationMilliseconds = endTimestamp - startTimestamp;
   const toleranceMilliseconds = 5 * 60_000;
+  if (Math.abs(durationMilliseconds - 15 * 60_000) <= toleranceMilliseconds) return '15m';
+  if (Math.abs(durationMilliseconds - 5 * 60_000) <= toleranceMilliseconds) return '5m';
   if (Math.abs(durationMilliseconds - 60 * 60_000) <= toleranceMilliseconds) return '1h';
   if (Math.abs(durationMilliseconds - 4 * 60 * 60_000) <= toleranceMilliseconds) return '4h';
   if (Math.abs(durationMilliseconds - 24 * 60 * 60_000) <= toleranceMilliseconds) return '1d';
@@ -374,7 +481,7 @@ function extractNestedText(value: unknown): string[] {
   return ['slug', 'title', 'question', 'description', 'name'].flatMap((fieldName) => extractNestedText(value[fieldName]));
 }
 
-function buildRejectedRawMarket(rawMarket: Record<string, unknown>, rawMarketFilePath: string, rejectionReason: string, detectedMarketDuration: MarketDuration | null, dataQualityFlags: string[]): RejectedMarket {
+function buildRejectedRawMarket(rawMarket: Record<string, unknown>, rawMarketFilePath: string, rejectionReason: string, detectedMarketDuration: DetectedMarketDuration | null, dataQualityFlags: string[]): RejectedMarket {
   const existingFlags = Array.isArray(rawMarket['__dataQualityFlags']) ? rawMarket['__dataQualityFlags'].map(String) : [];
   return {
     marketSlug: typeof rawMarket['slug'] === 'string' ? rawMarket['slug'] : null,
@@ -393,6 +500,66 @@ function deduplicationKey(rawMarket: Record<string, unknown>): string {
   const slug = typeof rawMarket['slug'] === 'string' ? rawMarket['slug'] : typeof rawMarket['marketSlug'] === 'string' ? rawMarket['marketSlug'] : null;
   if (slug !== null && slug.length > 0) return `slug:${slug}`;
   return `question:${String(rawMarket['question'] ?? rawMarket['title'] ?? JSON.stringify(rawMarket))}`;
+}
+
+
+function buildDebugQuery(source: GammaDiscoverySource, queryTerm: string, url: URL, rawItemsFetched: number, candidates: Record<string, unknown>[]): GammaDiscoveryDebugQuery {
+  return {
+    source,
+    queryTerm,
+    url: url.toString(),
+    rawItemsFetched,
+    candidateMarketsExtracted: candidates.length,
+    locallyMatchedMarkets: candidates.filter(isBitcoinUpDownMarket).length,
+    acceptedMarketsFromThisQuery: 0,
+    rejectedMarketsFromThisQuery: 0,
+    extractedCandidates: candidates.map((candidate) => ({
+      conditionId: typeof candidate['conditionId'] === 'string' ? candidate['conditionId'] : typeof candidate['condition_id'] === 'string' ? candidate['condition_id'] : null,
+      marketSlug: typeof candidate['slug'] === 'string' ? candidate['slug'] : typeof candidate['marketSlug'] === 'string' ? candidate['marketSlug'] : null,
+      question: typeof candidate['question'] === 'string' ? candidate['question'] : typeof candidate['title'] === 'string' ? candidate['title'] : null,
+      detectedMarketDuration: detectMarketDuration(candidate),
+      rejectionReason: null,
+    })),
+  };
+}
+
+function topLevelItems(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (!isRecord(value)) return [];
+  for (const fieldName of ['markets', 'events', 'items', 'results', 'data', 'series']) {
+    const fieldValue = value[fieldName];
+    if (Array.isArray(fieldValue)) return fieldValue;
+  }
+  return [value];
+}
+
+function extractCandidateMarkets(value: unknown): Record<string, unknown>[] {
+  return deduplicateRawMarkets(extractCandidateMarketsInner(value, 0));
+}
+
+function extractCandidateMarketsInner(value: unknown, depth: number): Record<string, unknown>[] {
+  if (depth > 6) return [];
+  if (Array.isArray(value)) return value.flatMap((item) => extractCandidateMarketsInner(item, depth + 1));
+  if (!isRecord(value)) return [];
+  const direct = looksLikeMarket(value) ? [value] : [];
+  const nested = ['markets', 'market', 'events', 'event', 'items', 'results', 'data', 'series'].flatMap((fieldName) => extractCandidateMarketsInner(value[fieldName], depth + 1));
+  return [...direct, ...nested];
+}
+
+function looksLikeMarket(record: Record<string, unknown>): boolean {
+  return (typeof record['question'] === 'string' || typeof record['title'] === 'string') && (typeof record['slug'] === 'string' || typeof record['marketSlug'] === 'string' || typeof record['conditionId'] === 'string' || typeof record['condition_id'] === 'string');
+}
+
+function deduplicateRawMarkets(markets: Record<string, unknown>[]): Record<string, unknown>[] {
+  const deduplicated = new Map<string, Record<string, unknown>>();
+  for (const market of markets) deduplicated.set(deduplicationKey(market), market);
+  return [...deduplicated.values()];
+}
+
+function normalizedDeduplicationKey(conditionId: string | null, marketSlug: string | null, question: string | null): string {
+  if (conditionId !== null && conditionId.length > 0) return `condition:${conditionId}`;
+  if (marketSlug !== null && marketSlug.length > 0) return `slug:${marketSlug}`;
+  return `question:${String(question ?? '')}`;
 }
 
 function minNullableTimestamp(currentTimestamp: number | null, isoTimestamp: string | null): number | null {

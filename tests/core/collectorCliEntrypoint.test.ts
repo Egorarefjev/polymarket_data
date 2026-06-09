@@ -19,6 +19,7 @@ function createUseCases(overrides: Partial<Record<keyof CollectorUseCases, (opti
   const fallback = async (_options: CollectorOptions): Promise<void> => undefined;
   return {
     discoverMarkets: overrides.discoverMarkets ?? fallback,
+    diagnoseDiscovery: overrides.diagnoseDiscovery ?? fallback,
     downloadPolymarketPrices: overrides.downloadPolymarketPrices ?? fallback,
     downloadPolymarketTrades: overrides.downloadPolymarketTrades ?? fallback,
     downloadBinance: overrides.downloadBinance ?? fallback,
@@ -45,6 +46,7 @@ describe('createCollectorProgram', () => {
     const commandNames = program.commands.map((command) => command.name());
 
     expect(commandNames).toContain('discover');
+    expect(commandNames).toContain('diagnose-discovery');
     expect(commandNames).toContain('all');
     expect(commandNames).toContain('doctor');
     expect(createCollectorUseCases).not.toHaveBeenCalled();
@@ -104,6 +106,12 @@ describe('collector CLI commands', () => {
     const discoverMarkets = vi.fn(async () => undefined);
     await runCollectorCli(['node', 'collector', 'discover', '--date', '2026-05-01'], createDependencies({ createCollectorUseCases: () => createUseCases({ discoverMarkets }) }));
     expect(discoverMarkets).toHaveBeenCalledOnce();
+  });
+
+  it('diagnose-discovery calls diagnoseDiscovery exactly once', async () => {
+    const diagnoseDiscovery = vi.fn(async () => undefined);
+    await runCollectorCli(['node', 'collector', 'diagnose-discovery', '--date', '2026-05-01'], createDependencies({ createCollectorUseCases: () => createUseCases({ diagnoseDiscovery }) }));
+    expect(diagnoseDiscovery).toHaveBeenCalledOnce();
   });
 
   it('all calls runFullPipeline exactly once', async () => {
