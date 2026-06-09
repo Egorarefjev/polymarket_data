@@ -65,7 +65,7 @@ export class CollectorUseCases {
 
     const rawMarkets = (await this.fileStorage.exists(rawGammaFilePath)) && !options.force
       ? await this.fileStorage.readJson<Record<string, unknown>[]>(rawGammaFilePath)
-      : await this.gammaApiAdapter.discoverBitcoinUpDownMarkets(options.startDate, options.endDate, { allowBroadGammaDateScan: options.allowBroadGammaDateScan });
+      : await this.gammaApiAdapter.discoverBitcoinUpDownMarkets(options.startDate, options.endDate, { allowBroadGammaDateScan: options.allowBroadGammaDateScan, requestedMarketDuration: options.marketDuration });
     await this.fileStorage.writeJson(rawGammaFilePath, rawMarkets, options.force);
 
     const discoveryResult = this.gammaApiAdapter.parseMarkets(rawMarkets, this.fileStorage.resolve(rawGammaFilePath), options.marketDuration);
@@ -73,6 +73,8 @@ export class CollectorUseCases {
     await this.fileStorage.writeJsonLines(rejectedMarketsRelativeFilePath(options), discoveryResult.rejectedMarkets, true);
     await this.writeMarketsParquet(options, discoveryResult.acceptedMarkets);
     await this.writeRejectedMarketsParquet(options, discoveryResult.rejectedMarkets);
+    const discoveryDebug = this.gammaApiAdapter.attachParseResultsToLastDiscoveryDebug(discoveryResult);
+    if (discoveryDebug !== null) await this.fileStorage.writeJson(discoveryDebugRelativeFilePath(options), discoveryDebug, true);
 
     this.logger.info(
       {
@@ -83,6 +85,10 @@ export class CollectorUseCases {
         rejectedMarkets: discoveryResult.rejectedMarkets.length,
         marketsWithoutTarget: discoveryResult.rejectedMarkets.filter((market) => market.rejectionReason === 'target_price_missing').length,
         marketsWithoutTokenIds: discoveryResult.rejectedMarkets.filter((market) => market.rejectionReason === 'token_ids_missing').length,
+        rawResponsesFetched: discoveryDebug?.rawResponsesFetched ?? null,
+        deduplicatedCandidateMarkets: discoveryDebug?.deduplicatedCandidateMarkets ?? rawMarkets.length,
+        acceptedByDuration: discoveryDebug?.acceptedByDuration ?? countAcceptedByDuration(discoveryResult.acceptedMarkets),
+        rejectedByReason: discoveryDebug?.rejectedByReason ?? countRejectedByReason(discoveryResult.rejectedMarkets),
       },
       'Market discovery completed',
     );
@@ -240,11 +246,20 @@ export class CollectorUseCases {
     await this.writeMarketSummariesFromPricePoints(options, markets, pricePoints);
   }
 
+  public async diagnoseDiscovery(options: CollectorOptions): Promise<void> {
+    await this.discoverMarkets(options);
+    const debug = this.gammaApiAdapter.getLastDiscoveryDebug();
+    if (debug !== null) {
+      for (const query of debug.queries) this.logger.info(query, 'Discovery query/source result');
+      this.logger.info({ discoveryDebugFilePath: this.fileStorage.resolve(discoveryDebugRelativeFilePath(options)), ...debug }, 'Discovery diagnosis completed');
+    }
+  }
+
   public async runFullPipeline(options: CollectorOptions): Promise<void> {
     await this.discoverMarkets(options);
     const acceptedMarkets = await this.readAcceptedMarkets(options);
     if (acceptedMarkets.length === 0 && !options.allowEmptyMarketSet) {
-      throw new Error('No BTC Up/Down markets accepted for requested date range/duration. Check Gamma discovery queries or try another date.');
+      throw new Error('No BTC Up/Down markets accepted for requested 1h/4h/1d date range. Inspect discovery_debug JSON.');
     }
     await this.downloadPolymarketPrices(options);
     // Proxy debug mode without Chainlink needs Binance raw files because Binance becomes the non-official primary proxy source.
@@ -352,6 +367,7 @@ export function dateRangeStateKey(options: Pick<CollectorOptions, 'startDate' | 
 export function collectorStateKey(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `${marketDurationStateKey(options)}_${dateRangeStateKey(options)}`; }
 export function marketDurationStateKey(options: Pick<CollectorOptions, 'marketDuration'>): string { return options.marketDuration; }
 export function rawGammaRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `raw/gamma/btc-up-down_candidates_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.json`; }
+export function discoveryDebugRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `raw/gamma/discovery_debug_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.json`; }
 export function acceptedMarketsRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `processed/accepted_markets_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.jsonl`; }
 export function rejectedMarketsRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `rejected/rejected_markets_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.jsonl`; }
 export function rawPriceHistoryRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'priceFidelityMinutes' | 'marketDuration'>, marketSlug: string, outcome: 'up' | 'down'): string { return `raw/polymarket-prices/${marketDurationStateKey(options)}_${dateRangeStateKey(options)}_${marketSlug}_${outcome}_${options.priceFidelityMinutes}m.json`; }
@@ -425,5 +441,26 @@ function toMarketParquetRow(market: NormalizedMarket): Record<string, unknown> {
 function toPricePointParquetRow(pricePoint: NormalizedPricePoint): Record<string, unknown> { return { market_slug: pricePoint.marketSlug, condition_id: pricePoint.conditionId, market_duration: pricePoint.marketDuration, timestamp_milliseconds: pricePoint.timestampMilliseconds, seconds_left: pricePoint.secondsLeft, target_price: pricePoint.targetPrice, up_price: pricePoint.upPrice, down_price: pricePoint.downPrice, primary_price_source_name: pricePoint.primaryPriceSourceName, primary_price: pricePoint.primaryPrice, primary_timestamp_milliseconds: pricePoint.primaryTimestampMilliseconds, primary_distance_usd: pricePoint.primaryDistanceUsd, primary_distance_basis_points: pricePoint.primaryDistanceBasisPoints, chainlink_price: pricePoint.chainlinkPrice, chainlink_timestamp_milliseconds: pricePoint.chainlinkTimestampMilliseconds, chainlink_distance_usd: pricePoint.chainlinkDistanceUsd, chainlink_distance_basis_points: pricePoint.chainlinkDistanceBasisPoints, binance_price: pricePoint.binancePrice, binance_timestamp_milliseconds: pricePoint.binanceTimestampMilliseconds, binance_distance_usd: pricePoint.binanceDistanceUsd, binance_distance_basis_points: pricePoint.binanceDistanceBasisPoints, binance_minus_chainlink_basis_points: pricePoint.binanceMinusChainlinkBasisPoints, winner: pricePoint.winner, is_resolved: pricePoint.isResolved, data_quality_flags: serializeDataQualityFlags(pricePoint.dataQualityFlags), future_maximum_up_price: pricePoint.futureMaximumUpPrice, future_maximum_down_price: pricePoint.futureMaximumDownPrice, future_minimum_up_price: pricePoint.futureMinimumUpPrice, future_minimum_down_price: pricePoint.futureMinimumDownPrice, future_final_up_price: pricePoint.futureFinalUpPrice, future_final_down_price: pricePoint.futureFinalDownPrice, future_seconds_until_up_price_greater_than_or_equal_075: pricePoint.futureSecondsUntilUpPriceGreaterThanOrEqual075, future_seconds_until_up_price_greater_than_or_equal_080: pricePoint.futureSecondsUntilUpPriceGreaterThanOrEqual080, future_seconds_until_up_price_greater_than_or_equal_090: pricePoint.futureSecondsUntilUpPriceGreaterThanOrEqual090, future_seconds_until_up_price_greater_than_or_equal_095: pricePoint.futureSecondsUntilUpPriceGreaterThanOrEqual095, future_seconds_until_up_price_greater_than_or_equal_099: pricePoint.futureSecondsUntilUpPriceGreaterThanOrEqual099, future_seconds_until_down_price_greater_than_or_equal_075: pricePoint.futureSecondsUntilDownPriceGreaterThanOrEqual075, future_seconds_until_down_price_greater_than_or_equal_080: pricePoint.futureSecondsUntilDownPriceGreaterThanOrEqual080, future_seconds_until_down_price_greater_than_or_equal_090: pricePoint.futureSecondsUntilDownPriceGreaterThanOrEqual090, future_seconds_until_down_price_greater_than_or_equal_095: pricePoint.futureSecondsUntilDownPriceGreaterThanOrEqual095, future_seconds_until_down_price_greater_than_or_equal_099: pricePoint.futureSecondsUntilDownPriceGreaterThanOrEqual099, future_reaches_up_075: pricePoint.futureReachesUp075, future_reaches_up_080: pricePoint.futureReachesUp080, future_reaches_up_090: pricePoint.futureReachesUp090, future_reaches_up_095: pricePoint.futureReachesUp095, future_reaches_up_099: pricePoint.futureReachesUp099, future_reaches_down_075: pricePoint.futureReachesDown075, future_reaches_down_080: pricePoint.futureReachesDown080, future_reaches_down_090: pricePoint.futureReachesDown090, future_reaches_down_095: pricePoint.futureReachesDown095, future_reaches_down_099: pricePoint.futureReachesDown099 }; }
 function toMarketSummaryParquetRow(summary: ReturnType<typeof buildMarketSummary>): Record<string, unknown> { return { market_slug: summary.marketSlug, condition_id: summary.conditionId, market_duration: summary.marketDuration, market_start_timestamp_milliseconds: summary.marketStartTimestampMilliseconds, market_end_timestamp_milliseconds: summary.marketEndTimestampMilliseconds, target_price: summary.targetPrice, winner: summary.winner, primary_price_source_name: summary.primaryPriceSourceName, close_primary_price: summary.closePrimaryPrice, final_primary_distance_basis_points: summary.finalPrimaryDistanceBasisPoints, close_chainlink_price: summary.closeChainlinkPrice, final_chainlink_distance_basis_points: summary.finalChainlinkDistanceBasisPoints, close_binance_price: summary.closeBinancePrice, final_binance_distance_basis_points: summary.finalBinanceDistanceBasisPoints, final_binance_minus_chainlink_basis_points: summary.finalBinanceMinusChainlinkBasisPoints, maximum_up_price: summary.maximumUpPrice, maximum_down_price: summary.maximumDownPrice, up_price_open: summary.upPriceOpen, down_price_open: summary.downPriceOpen, up_price_close: summary.upPriceClose, down_price_close: summary.downPriceClose, up_price_minimum: summary.upPriceMinimum, up_price_maximum: summary.upPriceMaximum, down_price_minimum: summary.downPriceMinimum, down_price_maximum: summary.downPriceMaximum, up_price_range: summary.upPriceRange, down_price_range: summary.downPriceRange, up_price_last: summary.upPriceLast, down_price_last: summary.downPriceLast, up_price_mean: summary.upPriceMean, down_price_mean: summary.downPriceMean, up_price_median: summary.upPriceMedian, down_price_median: summary.downPriceMedian, up_price_standard_deviation: summary.upPriceStandardDeviation, down_price_standard_deviation: summary.downPriceStandardDeviation, up_price_number_of_observations: summary.upPriceNumberOfObservations, down_price_number_of_observations: summary.downPriceNumberOfObservations, price_points_count: summary.pricePointsCount, first_timestamp_up_price_greater_than_or_equal_075: summary.firstTimestampUpPriceGreaterThanOrEqual075, first_timestamp_up_price_greater_than_or_equal_080: summary.firstTimestampUpPriceGreaterThanOrEqual080, first_timestamp_up_price_greater_than_or_equal_090: summary.firstTimestampUpPriceGreaterThanOrEqual090, first_timestamp_up_price_greater_than_or_equal_095: summary.firstTimestampUpPriceGreaterThanOrEqual095, first_timestamp_up_price_greater_than_or_equal_099: summary.firstTimestampUpPriceGreaterThanOrEqual099, seconds_left_at_first_up_price_greater_than_or_equal_090: summary.secondsLeftAtFirstUpPriceGreaterThanOrEqual090, first_timestamp_down_price_greater_than_or_equal_075: summary.firstTimestampDownPriceGreaterThanOrEqual075, first_timestamp_down_price_greater_than_or_equal_080: summary.firstTimestampDownPriceGreaterThanOrEqual080, first_timestamp_down_price_greater_than_or_equal_090: summary.firstTimestampDownPriceGreaterThanOrEqual090, first_timestamp_down_price_greater_than_or_equal_095: summary.firstTimestampDownPriceGreaterThanOrEqual095, first_timestamp_down_price_greater_than_or_equal_099: summary.firstTimestampDownPriceGreaterThanOrEqual099, seconds_left_at_first_down_price_greater_than_or_equal_090: summary.secondsLeftAtFirstDownPriceGreaterThanOrEqual090, data_quality_flags: serializeDataQualityFlags(summary.dataQualityFlags) }; }
 function toStrategyTrainingRowParquetRow(row: StrategyTrainingRow): Record<string, unknown> { return { market_slug: row.marketSlug, condition_id: row.conditionId, market_duration: row.marketDuration, timestamp_milliseconds: row.timestampMilliseconds, seconds_left: row.secondsLeft, target_price: row.targetPrice, up_price: row.upPrice, down_price: row.downPrice, primary_price_source_name: row.primaryPriceSourceName, primary_price: row.primaryPrice, primary_timestamp_milliseconds: row.primaryTimestampMilliseconds, primary_distance_usd: row.primaryDistanceUsd, primary_distance_basis_points: row.primaryDistanceBasisPoints, binance_price: row.binancePrice, binance_timestamp_milliseconds: row.binanceTimestampMilliseconds, binance_distance_usd: row.binanceDistanceUsd, binance_distance_basis_points: row.binanceDistanceBasisPoints, binance_minus_chainlink_basis_points: row.binanceMinusChainlinkBasisPoints, up_price_change_previous_1_point: row.upPriceChangePrevious1Point, down_price_change_previous_1_point: row.downPriceChangePrevious1Point, up_price_change_previous_2_points: row.upPriceChangePrevious2Points, down_price_change_previous_2_points: row.downPriceChangePrevious2Points, up_price_change_previous_3_points: row.upPriceChangePrevious3Points, down_price_change_previous_3_points: row.downPriceChangePrevious3Points, winner: row.winner, up_wins_binary: row.upWinsBinary, future_maximum_up_price: row.futureMaximumUpPrice, future_maximum_down_price: row.futureMaximumDownPrice, future_minimum_up_price: row.futureMinimumUpPrice, future_minimum_down_price: row.futureMinimumDownPrice, future_final_up_price: row.futureFinalUpPrice, future_final_down_price: row.futureFinalDownPrice, future_seconds_until_up_price_greater_than_or_equal_090: row.futureSecondsUntilUpPriceGreaterThanOrEqual090, future_seconds_until_down_price_greater_than_or_equal_090: row.futureSecondsUntilDownPriceGreaterThanOrEqual090, future_reaches_up_090: row.futureReachesUp090, future_reaches_up_095: row.futureReachesUp095, future_reaches_up_099: row.futureReachesUp099, future_reaches_down_090: row.futureReachesDown090, future_reaches_down_095: row.futureReachesDown095, future_reaches_down_099: row.futureReachesDown099, data_quality_flags: serializeDataQualityFlags(row.dataQualityFlags) }; }
+
+function countAcceptedByDuration(markets: NormalizedMarket[]): Record<'1h' | '4h' | '1d', number> {
+  return {
+    '1h': markets.filter((market) => market.marketDuration === '1h').length,
+    '4h': markets.filter((market) => market.marketDuration === '4h').length,
+    '1d': markets.filter((market) => market.marketDuration === '1d').length,
+  };
+}
+
+function countRejectedByReason(markets: RejectedMarket[]): Record<string, number> {
+  const counts: Record<string, number> = {
+    unsupported_duration: 0,
+    unknown_duration: 0,
+    not_explicit_up_down_product: 0,
+    non_up_down_outcomes: 0,
+    target_price_missing: 0,
+    token_ids_missing: 0,
+  };
+  for (const market of markets) counts[market.rejectionReason] = (counts[market.rejectionReason] ?? 0) + 1;
+  return counts;
+}
 
 function toRejectedMarketParquetRow(rejectedMarket: RejectedMarket): Record<string, unknown> { return { market_slug: rejectedMarket.marketSlug, condition_id: rejectedMarket.conditionId, question: rejectedMarket.question, detected_market_duration: rejectedMarket.detectedMarketDuration ?? null, rejection_reason: rejectedMarket.rejectionReason, raw_market_file_path: rejectedMarket.rawMarketFilePath, data_quality_flags: serializeDataQualityFlags(rejectedMarket.dataQualityFlags) }; }

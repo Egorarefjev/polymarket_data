@@ -44,6 +44,7 @@ export function createCollectorProgram(dependencies: CollectorCliDependencies): 
   };
 
   registerUseCaseCommand(program, dependencies, runCommandAction, 'discover', (useCases, options) => useCases.discoverMarkets(options));
+  registerUseCaseCommand(program, dependencies, runCommandAction, 'diagnose-discovery', (useCases, options) => useCases.diagnoseDiscovery(options));
   registerUseCaseCommand(program, dependencies, runCommandAction, 'download-polymarket-prices', (useCases, options) => useCases.downloadPolymarketPrices(options));
   registerUseCaseCommand(program, dependencies, runCommandAction, 'download-polymarket-trades', (useCases, options) => useCases.downloadPolymarketTrades(options));
   registerUseCaseCommand(program, dependencies, runCommandAction, 'download-binance', (useCases, options) => useCases.downloadBinance(options));

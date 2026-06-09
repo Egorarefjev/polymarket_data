@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { PolymarketGammaApiAdapter } from '../../src/adapters/polymarketGammaApi.js';
 import { PolymarketClobApiAdapter } from '../../src/adapters/polymarketClobApi.js';
-import { detectMarketDuration, findTokenIdForOutcome, hasExplicitUpDownOutcomes, isBitcoinUpDownMarket, isRequestedMarketDuration } from '../../src/adapters/polymarketGammaApi.js';
+import { detectMarketDuration, durationSpecificBitcoinUpDownSearchTerms, findTokenIdForOutcome, hasExplicitUpDownOutcomes, isBitcoinUpDownMarket, isRequestedMarketDuration } from '../../src/adapters/polymarketGammaApi.js';
 import { processedMarketSummaryRelativeFilePath, processedMarketsRelativeFilePath, processedPricePointsRelativeFilePath, processedStrategyTrainingRowsRelativeFilePath } from '../../src/application/collectorUseCases.js';
 import { marketSummaryParquetSchema, marketsParquetSchema, pricePointsParquetSchema, rejectedMarketsParquetSchema, strategyTrainingRowsParquetSchema } from '../../src/application/schemas.js';
 import { parseOptions } from '../../src/cli/createCollectorProgram.js';
@@ -28,18 +28,37 @@ function gammaMarket(id: number): Record<string, unknown> {
 }
 
 describe('Gamma discovery pagination and filters', () => {
+  it('generates duration-specific BTC Up/Down query terms without 15m terms', () => {
+    expect(durationSpecificBitcoinUpDownSearchTerms('1h')).toEqual(expect.arrayContaining(['btc updown 1h', 'bitcoin up or down hourly', 'btc-updown-1h']));
+    expect(durationSpecificBitcoinUpDownSearchTerms('4h')).toEqual(expect.arrayContaining(['btc updown 4h', 'bitcoin up or down four hour', 'bitcoin-updown-4h']));
+    expect(durationSpecificBitcoinUpDownSearchTerms('1d')).toEqual(expect.arrayContaining(['btc updown daily', 'bitcoin up down 1d', 'bitcoin-updown-daily']));
+    const allTerms = durationSpecificBitcoinUpDownSearchTerms('all');
+    expect(allTerms).toEqual(expect.arrayContaining(['btc updown 1h', 'btc updown 4h', 'btc updown daily']));
+    expect(allTerms.some((term) => /15m|15\s*min|fifteen/u.test(term))).toBe(false);
+  });
+
+  it('parses public-search, events, and series responses and deduplicates candidates by slug', async () => {
+    const market = gammaMarket(7);
+    const httpClient = new MockHttpClient([{ markets: [market] }, { events: [{ slug: 'event-7', markets: [market] }] }, { series: [{ slug: 'series-7', events: [{ markets: [market] }] }] }]);
+    const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
+    const markets = await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: '1h' });
+    expect(markets).toEqual([market]);
+    expect(adapter.getLastDiscoveryDebug()?.queries.slice(0, 3).map((query) => query.source)).toEqual(['public-search', 'public-search', 'public-search']);
+    expect(adapter.getLastDiscoveryDebug()?.queries.some((query) => query.candidateMarketsExtracted === 1)).toBe(true);
+  });
   it('passes server-side BTC Up/Down query and end-date filters to Gamma API', async () => {
     const httpClient = new MockHttpClient([[gammaMarket(1)]]);
     const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
     await adapter.discoverBitcoinUpDownFiveMinuteMarkets('2026-05-01', '2026-05-02');
     const url = httpClient.urls[0];
-    expect(url?.searchParams.get('closed')).toBe('true');
-    expect(url?.searchParams.get('order')).toBe('endDate');
-    expect(url?.searchParams.get('ascending')).toBe('true');
-    expect(url?.searchParams.get('end_date_min')).toBe('2026-05-01T00:00:00.000Z');
-    expect(url?.searchParams.get('end_date_max')).toBe('2026-05-02T00:00:00.000Z');
-    expect(['query', 'q', 'search', 'slug'].some((parameterName) => url?.searchParams.has(parameterName))).toBe(true);
-    expect(url?.pathname).toBe('/markets');
+    expect(url?.pathname).toBe('/public-search');
+    expect(url?.searchParams.get('q')).toBe('btc updown 1h');
+    const eventsUrl = httpClient.urls.find((candidateUrl) => candidateUrl.pathname === '/events');
+    expect(eventsUrl?.searchParams.get('closed')).toBe('true');
+    expect(eventsUrl?.searchParams.get('order')).toBe('endDate');
+    expect(eventsUrl?.searchParams.get('ascending')).toBe('true');
+    expect(eventsUrl?.searchParams.get('end_date_min')).toBe('2026-05-01T00:00:00.000Z');
+    expect(eventsUrl?.searchParams.get('end_date_max')).toBe('2026-05-02T00:00:00.000Z');
   });
 
   it('does not use broad keyset/date scan by default and filters unrelated search results out of candidates', async () => {
@@ -49,11 +68,14 @@ describe('Gamma discovery pagination and filters', () => {
     const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
     const markets = await adapter.discoverBitcoinUpDownFiveMinuteMarkets('2026-05-01', '2026-05-02');
     expect(markets).toEqual([btcMarket]);
-    expect(httpClient.urls.every((url) => url.pathname === '/markets')).toBe(true);
+    expect(httpClient.urls.some((url) => url.pathname === '/public-search')).toBe(true);
+    expect(httpClient.urls.some((url) => url.pathname === '/events')).toBe(true);
+    expect(httpClient.urls.some((url) => url.pathname === '/series')).toBe(true);
+    expect(httpClient.urls.some((url) => url.pathname === '/markets')).toBe(true);
   });
 
   it('allows broad date scan only when explicitly enabled and flags broad candidates', async () => {
-    const emptySearchResponses = Array.from({ length: 20 }, () => []);
+    const emptySearchResponses = Array.from({ length: 117 }, () => []);
     const broadMarket = { slug: 'chicago-first-snowfall', question: 'Will Chicago record the first snowfall?', startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-05-01T01:00:00.000Z' };
     const httpClient = new MockHttpClient([...emptySearchResponses, { markets: [broadMarket] }]);
     const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
@@ -185,13 +207,15 @@ describe('market duration discovery filters', () => {
     const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([]) as never, 'https://example.test');
     const oneHour = rawMarket('2026-05-01T00:00:00.000Z', '2026-05-01T01:00:00.000Z');
     const fiveMinute = rawMarket('2026-05-01T00:00:00.000Z', '2026-05-01T00:05:00.000Z', { slug: 'bitcoin-up-down-5m', question: 'Bitcoin Up or Down 5 minute - target price $100,000' });
+    const fifteenMinute = rawMarket('2026-05-01T00:00:00.000Z', '2026-05-01T00:15:00.000Z', { slug: 'btc-updown-15m-1777592700', question: 'Bitcoin Up or Down - April 30, 7:45PM-8:00PM ET' });
     const unknown = { ...oneHour, slug: 'bitcoin-up-down-unknown', startDate: undefined, endDate: undefined, question: 'Bitcoin Up or Down - target price $100,000' };
     const eth = { ...oneHour, slug: 'eth-up-down-hourly', question: 'Ethereum Up or Down - target price $2,000' };
-    const result = adapter.parseMarkets([oneHour, fiveMinute, unknown, eth], '/tmp/raw.json', '1h');
+    const result = adapter.parseMarkets([oneHour, fiveMinute, fifteenMinute, unknown, eth], '/tmp/raw.json', '1h');
     expect(result.acceptedMarkets).toHaveLength(1);
     expect(result.acceptedMarkets[0]?.marketDuration).toBe('1h');
-    expect(result.rejectedMarkets.map((market) => market.rejectionReason)).toEqual(['unsupported_duration', 'unknown_duration', 'not_bitcoin_up_down']);
-    expect(result.rejectedMarkets[0]?.detectedMarketDuration).toBeNull();
+    expect(result.rejectedMarkets.map((market) => market.rejectionReason)).toEqual(['unsupported_duration', 'unsupported_duration', 'unknown_duration', 'not_bitcoin_up_down']);
+    expect(result.rejectedMarkets[0]?.detectedMarketDuration).toBe('5m');
+    expect(result.rejectedMarkets[1]?.detectedMarketDuration).toBe('15m');
   });
 
   it('rejects supported Bitcoin Yes/No markets without explicit Up/Down product phrases', () => {
