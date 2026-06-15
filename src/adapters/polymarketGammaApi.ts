@@ -3,7 +3,7 @@ import { determineMarketWinner, extractTargetPrice, parseOutcomePrices, parseOut
 import { normalizeTimestampMilliseconds } from '../core/calculations.js';
 import { validateMarketForAnalysis } from '../core/validation.js';
 import { MarketParsingError } from '../application/errors.js';
-import type { PublicHttpClient } from './httpClient.js';
+import { PublicHttpClient } from './httpClient.js';
 
 export interface GammaDiscoveryResult {
   rawMarkets: Record<string, unknown>[];
@@ -14,6 +14,12 @@ export interface GammaDiscoveryResult {
 export interface GammaDiscoveryOptions {
   allowBroadGammaDateScan?: boolean;
   requestedMarketDuration?: RequestedMarketDuration;
+  discoveryTimeoutSeconds?: number;
+  discoveryMaxPagesPerQuery?: number;
+  discoveryMaxTotalRequests?: number;
+  discoveryMaxCandidates?: number;
+  discoveryRequestTimeoutSeconds?: number;
+  discoveryExpandedSearch?: boolean;
 }
 
 export interface GammaDiscoveryDebugQuery {
@@ -41,6 +47,7 @@ export interface GammaDiscoveryDebug {
   rejectedMarkets: number;
   acceptedByDuration: Record<MarketDuration, number>;
   rejectedByReason: Record<string, number>;
+  stopReason: GammaDiscoveryStopReason;
   queries: GammaDiscoveryDebugQuery[];
 }
 
@@ -52,10 +59,15 @@ interface GammaDiscoveryPageResult {
   latestFetchedEndDate: string | null;
 }
 
-type GammaDiscoverySource = 'public-search' | 'events' | 'series' | 'markets';
+interface GammaHttpClient {
+  getJson<T>(url: URL, options?: { timeoutMilliseconds?: number; maximumRetries?: number }): Promise<T>;
+}
 
-const GAMMA_SEARCH_PARAMETER_NAMES = ['q', 'query', 'search'] as const;
-const MARKET_SEARCH_PARAMETER_NAMES = ['q', 'query', 'search', 'slug'] as const;
+type GammaDiscoverySource = 'public-search' | 'events' | 'series' | 'markets';
+type GammaDiscoveryStopReason = 'max_total_requests' | 'max_candidates' | 'timeout' | 'completed';
+
+const GAMMA_SEARCH_PARAMETER_NAMES = ['q'] as const;
+const MARKET_SEARCH_PARAMETER_NAMES = ['q'] as const;
 const SUPPORTED_MARKET_DURATIONS: MarketDuration[] = ['1h', '4h', '1d'];
 const EMPTY_ACCEPTED_BY_DURATION: Record<MarketDuration, number> = { '1h': 0, '4h': 0, '1d': 0 };
 const EMPTY_REJECTED_BY_REASON: Record<string, number> = {
@@ -67,22 +79,52 @@ const EMPTY_REJECTED_BY_REASON: Record<string, number> = {
   token_ids_missing: 0,
 };
 
+
+const DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 60;
+const DEFAULT_DISCOVERY_MAX_PAGES_PER_QUERY = 2;
+const DEFAULT_DISCOVERY_MAX_TOTAL_REQUESTS = 50;
+const DEFAULT_DISCOVERY_MAX_CANDIDATES = 500;
+const DEFAULT_DISCOVERY_REQUEST_TIMEOUT_SECONDS = 10;
+
+const PRIORITIZED_DURATION_SEARCH_TERMS: Record<MarketDuration, readonly string[]> = {
+  '1h': ['btc updown 1h', 'bitcoin up or down hourly'],
+  '4h': ['btc updown 4h', 'bitcoin up or down 4h'],
+  '1d': ['btc updown daily', 'bitcoin up or down daily'],
+};
+
 const DURATION_SEARCH_TERMS: Record<MarketDuration, readonly string[]> = {
   '1h': ['btc updown 1h', 'bitcoin updown 1h', 'btc up down 1 hour', 'bitcoin up or down hourly', 'bitcoin up down hourly', 'btc up/down hourly', 'bitcoin up or down 1h', 'btc-updown-1h', 'bitcoin-updown-1h'],
   '4h': ['btc updown 4h', 'bitcoin updown 4h', 'btc up down 4 hour', 'bitcoin up or down 4 hour', 'bitcoin up down 4h', 'btc up/down 4h', 'bitcoin up or down four hour', 'btc-updown-4h', 'bitcoin-updown-4h'],
   '1d': ['btc updown daily', 'bitcoin updown daily', 'btc up down daily', 'bitcoin up or down daily', 'bitcoin up down 1d', 'btc up/down daily', 'bitcoin up or down day', 'btc-updown-1d', 'bitcoin-updown-1d', 'btc-updown-daily', 'bitcoin-updown-daily'],
 };
 
-export function durationSpecificBitcoinUpDownSearchTerms(requestedDuration: RequestedMarketDuration): string[] {
+export function durationSpecificBitcoinUpDownSearchTerms(requestedDuration: RequestedMarketDuration, expandedSearch = true): string[] {
   const durations = requestedDuration === 'all' ? SUPPORTED_MARKET_DURATIONS : [requestedDuration];
-  return [...new Set(durations.flatMap((duration) => DURATION_SEARCH_TERMS[duration]))];
+  const termSource = expandedSearch ? DURATION_SEARCH_TERMS : PRIORITIZED_DURATION_SEARCH_TERMS;
+  return [...new Set(durations.flatMap((duration) => termSource[duration]))];
 }
+
+function normalizeDiscoveryOptions(options: GammaDiscoveryOptions): Required<Pick<GammaDiscoveryOptions, 'discoveryTimeoutSeconds' | 'discoveryMaxPagesPerQuery' | 'discoveryMaxTotalRequests' | 'discoveryMaxCandidates' | 'discoveryRequestTimeoutSeconds' | 'discoveryExpandedSearch'>> {
+  return {
+    discoveryTimeoutSeconds: options.discoveryTimeoutSeconds ?? DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
+    discoveryMaxPagesPerQuery: options.discoveryMaxPagesPerQuery ?? DEFAULT_DISCOVERY_MAX_PAGES_PER_QUERY,
+    discoveryMaxTotalRequests: options.discoveryMaxTotalRequests ?? DEFAULT_DISCOVERY_MAX_TOTAL_REQUESTS,
+    discoveryMaxCandidates: options.discoveryMaxCandidates ?? DEFAULT_DISCOVERY_MAX_CANDIDATES,
+    discoveryRequestTimeoutSeconds: options.discoveryRequestTimeoutSeconds ?? DEFAULT_DISCOVERY_REQUEST_TIMEOUT_SECONDS,
+    discoveryExpandedSearch: options.discoveryExpandedSearch ?? false,
+  };
+}
+
+function validatePositiveDiscoveryInteger(name: string, value: number): void {
+  if (!Number.isFinite(value) || value < 1 || !Number.isInteger(value)) throw new Error(`${name} must be a positive integer`);
+}
+
 
 export class PolymarketGammaApiAdapter {
   private lastDiscoveryDebug: GammaDiscoveryDebug | null = null;
 
   public constructor(
-    private readonly httpClient: PublicHttpClient,
+    private readonly httpClient: GammaHttpClient,
     private readonly baseUrl = 'https://gamma-api.polymarket.com',
   ) {}
 
@@ -117,8 +159,18 @@ export class PolymarketGammaApiAdapter {
 
   public async discoverBitcoinUpDownMarkets(startDate: string, endDate: string, options: GammaDiscoveryOptions = {}): Promise<Record<string, unknown>[]> {
     const requestedMarketDuration = options.requestedMarketDuration ?? '1h';
-    const searchDiscovery = await this.discoverWithDurationSpecificQueries(startDate, endDate, requestedMarketDuration);
-    let discovery: GammaDiscoveryPageResult = searchDiscovery;
+    const discoveryLimits = normalizeDiscoveryOptions(options);
+    validatePositiveDiscoveryInteger('--discovery-timeout-seconds', discoveryLimits.discoveryTimeoutSeconds);
+    validatePositiveDiscoveryInteger('--discovery-max-pages-per-query', discoveryLimits.discoveryMaxPagesPerQuery);
+    validatePositiveDiscoveryInteger('--discovery-max-total-requests', discoveryLimits.discoveryMaxTotalRequests);
+    validatePositiveDiscoveryInteger('--discovery-max-candidates', discoveryLimits.discoveryMaxCandidates);
+    validatePositiveDiscoveryInteger('--gamma-request-timeout-seconds', discoveryLimits.discoveryRequestTimeoutSeconds);
+    const startedAtMilliseconds = Date.now();
+    let searchDiscovery = await this.discoverWithDurationSpecificQueries(startDate, endDate, requestedMarketDuration, discoveryLimits, startedAtMilliseconds, false);
+    if (searchDiscovery.markets.length === 0 && discoveryLimits.discoveryExpandedSearch) {
+      searchDiscovery = await this.discoverWithDurationSpecificQueries(startDate, endDate, requestedMarketDuration, discoveryLimits, startedAtMilliseconds, true);
+    }
+    let discovery: GammaDiscoveryPageResult & { debug: GammaDiscoveryDebug } = searchDiscovery;
     if (searchDiscovery.markets.length === 0) {
       // eslint-disable-next-line no-console
       console.warn(JSON.stringify({ dataQualityFlag: 'gamma_search_returned_zero_candidates', startDate, endDate, requestedMarketDuration }));
@@ -126,7 +178,7 @@ export class PolymarketGammaApiAdapter {
         // eslint-disable-next-line no-console
         console.warn(JSON.stringify({ dataQualityFlag: 'broad_gamma_date_scan_enabled', startDate, endDate }));
         const broadDiscovery = (await this.tryDiscoverWithKeysetPagination(startDate, endDate)) ?? (await this.discoverWithOffsetPagination(startDate, endDate));
-        discovery = { ...broadDiscovery, markets: broadDiscovery.markets.map((market) => ({ ...market, __dataQualityFlags: ['broad_gamma_date_scan_candidate'] })) };
+        discovery = { ...searchDiscovery, ...broadDiscovery, markets: broadDiscovery.markets.map((market) => ({ ...market, __dataQualityFlags: ['broad_gamma_date_scan_candidate'] })) };
       }
     }
     if (!doesFetchedRangeCoverRequestedRange(discovery.earliestFetchedEndDate, discovery.latestFetchedEndDate, startDate, endDate) && discovery.rawMarketsFetched > 0) {
@@ -136,29 +188,58 @@ export class PolymarketGammaApiAdapter {
     const locallyMatchedMarkets = discovery.markets.filter(isBitcoinUpDownMarket).length;
     this.lastDiscoveryDebug = { ...searchDiscovery.debug, candidateMarketsFetched: searchDiscovery.rawMarketsFetched, deduplicatedCandidateMarkets: discovery.markets.length, locallyMatchedMarkets };
     // eslint-disable-next-line no-console
-    console.info(JSON.stringify({ pagesFetched: discovery.pagesFetched, rawResponsesFetched: this.lastDiscoveryDebug.rawResponsesFetched, rawMarketsFetched: discovery.rawMarketsFetched, candidateMarketsFetched: discovery.rawMarketsFetched, deduplicatedCandidateMarkets: discovery.markets.length, locallyMatchedMarkets, matchingMarketsFound: locallyMatchedMarkets, acceptedByDuration: this.lastDiscoveryDebug.acceptedByDuration, rejectedByReason: this.lastDiscoveryDebug.rejectedByReason, earliestFetchedEndDate: discovery.earliestFetchedEndDate, latestFetchedEndDate: discovery.latestFetchedEndDate }));
+    console.info(`Discovery stopped: reason=${this.lastDiscoveryDebug.stopReason}`);
+    // eslint-disable-next-line no-console
+    console.info(JSON.stringify({ pagesFetched: discovery.pagesFetched, rawResponsesFetched: this.lastDiscoveryDebug.rawResponsesFetched, rawMarketsFetched: discovery.rawMarketsFetched, candidateMarketsFetched: discovery.rawMarketsFetched, deduplicatedCandidateMarkets: discovery.markets.length, locallyMatchedMarkets, matchingMarketsFound: locallyMatchedMarkets, acceptedByDuration: this.lastDiscoveryDebug.acceptedByDuration, rejectedByReason: this.lastDiscoveryDebug.rejectedByReason, stopReason: this.lastDiscoveryDebug.stopReason, earliestFetchedEndDate: discovery.earliestFetchedEndDate, latestFetchedEndDate: discovery.latestFetchedEndDate }));
     return discovery.markets;
   }
 
-  private async discoverWithDurationSpecificQueries(startDate: string, endDate: string, requestedMarketDuration: RequestedMarketDuration): Promise<GammaDiscoveryPageResult & { debug: GammaDiscoveryDebug }> {
+  private async discoverWithDurationSpecificQueries(
+    startDate: string,
+    endDate: string,
+    requestedMarketDuration: RequestedMarketDuration,
+    limits: Required<Pick<GammaDiscoveryOptions, 'discoveryTimeoutSeconds' | 'discoveryMaxPagesPerQuery' | 'discoveryMaxTotalRequests' | 'discoveryMaxCandidates' | 'discoveryRequestTimeoutSeconds' | 'discoveryExpandedSearch'>>,
+    startedAtMilliseconds: number,
+    expandedSearch: boolean,
+  ): Promise<GammaDiscoveryPageResult & { debug: GammaDiscoveryDebug }> {
     const deduplicatedCandidates = new Map<string, Record<string, unknown>>();
     let pagesFetched = 0;
     let rawMarketsFetched = 0;
     let rawResponsesFetched = 0;
     let earliestFetchedEndTimestamp: number | null = null;
     let latestFetchedEndTimestamp: number | null = null;
+    let stopReason: GammaDiscoveryStopReason = 'completed';
+    let successfulResponses = 0;
+    let failedResponses = 0;
     const queries: GammaDiscoveryDebugQuery[] = [];
-    for (const source of ['public-search', 'events', 'series', 'markets'] as const) {
-      for (const searchTerm of durationSpecificBitcoinUpDownSearchTerms(requestedMarketDuration)) {
-        for (const url of this.discoveryUrls(source, searchTerm, startDate, endDate)) {
+    const deadlineMilliseconds = startedAtMilliseconds + limits.discoveryTimeoutSeconds * 1000;
+    const stopIfNeeded = (): boolean => {
+      if (rawResponsesFetched >= limits.discoveryMaxTotalRequests) stopReason = 'max_total_requests';
+      else if (deduplicatedCandidates.size >= limits.discoveryMaxCandidates) stopReason = 'max_candidates';
+      else if (Date.now() >= deadlineMilliseconds) stopReason = 'timeout';
+      else return false;
+      return true;
+    };
+    for (const searchTerm of durationSpecificBitcoinUpDownSearchTerms(requestedMarketDuration, expandedSearch)) {
+      const sources: readonly GammaDiscoverySource[] = requestedMarketDuration === 'all' && !expandedSearch ? ['public-search', 'markets'] : ['public-search', 'events', 'series', 'markets'];
+      for (const source of sources) {
+        for (const url of this.discoveryUrls(source, searchTerm, startDate, endDate, limits.discoveryMaxPagesPerQuery)) {
+          if (stopIfNeeded()) break;
+          const page = Number(url.searchParams.get('page') ?? '1');
+          // eslint-disable-next-line no-console
+          console.info(`Discovery request: source=${source} query="${searchTerm}" page=${page}`);
           try {
-            const rawResponse = await this.httpClient.getJson<unknown>(url);
+            const remainingMilliseconds = Math.max(1, deadlineMilliseconds - Date.now());
+            const requestTimeoutMilliseconds = Math.min(limits.discoveryRequestTimeoutSeconds * 1000, remainingMilliseconds);
+            const rawResponse = await this.getJsonWithTimeout<unknown>(url, requestTimeoutMilliseconds);
             rawResponsesFetched += 1;
+            successfulResponses += 1;
             pagesFetched += 1;
             const rawItems = topLevelItems(rawResponse);
             const candidates = extractCandidateMarkets(rawResponse).filter(isBitcoinUpDownMarket);
             rawMarketsFetched += candidates.length;
             for (const rawMarket of candidates) {
+              if (deduplicatedCandidates.size >= limits.discoveryMaxCandidates) break;
               const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']);
               if (endTimestamp !== null) {
                 earliestFetchedEndTimestamp = earliestFetchedEndTimestamp === null ? endTimestamp : Math.min(earliestFetchedEndTimestamp, endTimestamp);
@@ -166,35 +247,64 @@ export class PolymarketGammaApiAdapter {
               }
               deduplicatedCandidates.set(deduplicationKey(rawMarket), rawMarket);
             }
+            // eslint-disable-next-line no-console
+            console.info(`Discovery response: source=${source} query="${searchTerm}" items=${rawItems.length} candidates=${deduplicatedCandidates.size}`);
             queries.push(buildDebugQuery(source, searchTerm, url, rawItems.length, candidates));
           } catch (error) {
+            rawResponsesFetched += 1;
+            failedResponses += 1;
+            // eslint-disable-next-line no-console
+            console.info(`Discovery response: source=${source} query="${searchTerm}" items=0 candidates=${deduplicatedCandidates.size} error=${(error as Error).message} url=${url.toString()}`);
             queries.push({ source, queryTerm: searchTerm, url: url.toString(), rawItemsFetched: 0, candidateMarketsExtracted: 0, locallyMatchedMarkets: 0, acceptedMarketsFromThisQuery: 0, rejectedMarketsFromThisQuery: 0, extractedCandidates: [], error: (error as Error).message });
           }
         }
+        if (stopIfNeeded()) break;
       }
+      if (stopIfNeeded()) break;
     }
+    if (successfulResponses === 0 && failedResponses > 0 && stopReason === 'completed') throw new Error('All Gamma discovery sources failed');
     return {
       markets: [...deduplicatedCandidates.values()],
       pagesFetched,
       rawMarketsFetched,
       earliestFetchedEndDate: earliestFetchedEndTimestamp === null ? null : new Date(earliestFetchedEndTimestamp).toISOString(),
       latestFetchedEndDate: latestFetchedEndTimestamp === null ? null : new Date(latestFetchedEndTimestamp).toISOString(),
-      debug: { startDate, endDate, requestedMarketDuration, rawResponsesFetched, candidateMarketsFetched: rawMarketsFetched, deduplicatedCandidateMarkets: deduplicatedCandidates.size, locallyMatchedMarkets: [...deduplicatedCandidates.values()].filter(isBitcoinUpDownMarket).length, acceptedMarkets: 0, rejectedMarkets: 0, acceptedByDuration: { ...EMPTY_ACCEPTED_BY_DURATION }, rejectedByReason: { ...EMPTY_REJECTED_BY_REASON }, queries },
+      debug: { startDate, endDate, requestedMarketDuration, rawResponsesFetched, candidateMarketsFetched: rawMarketsFetched, deduplicatedCandidateMarkets: deduplicatedCandidates.size, locallyMatchedMarkets: [...deduplicatedCandidates.values()].filter(isBitcoinUpDownMarket).length, acceptedMarkets: 0, rejectedMarkets: 0, acceptedByDuration: { ...EMPTY_ACCEPTED_BY_DURATION }, rejectedByReason: { ...EMPTY_REJECTED_BY_REASON }, stopReason, queries },
     };
   }
 
-  private discoveryUrls(source: GammaDiscoverySource, searchTerm: string, startDate: string, endDate: string): URL[] {
+  private async getJsonWithTimeout<T>(url: URL, timeoutMilliseconds: number): Promise<T> {
+    if (this.httpClient instanceof PublicHttpClient) return this.httpClient.getJson<T>(url, { timeoutMilliseconds, maximumRetries: 0 });
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        this.httpClient.getJson<T>(url, { timeoutMilliseconds, maximumRetries: 0 }),
+        new Promise<T>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error(`Gamma request timed out after ${timeoutMilliseconds}ms`)), timeoutMilliseconds);
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  }
+
+  private discoveryUrls(source: GammaDiscoverySource, searchTerm: string, startDate: string, endDate: string, maxPagesPerQuery: number): URL[] {
     const endpoint = source === 'public-search' ? '/public-search' : source === 'events' ? '/events' : source === 'series' ? '/series' : '/markets';
     const parameterNames = source === 'markets' ? MARKET_SEARCH_PARAMETER_NAMES : GAMMA_SEARCH_PARAMETER_NAMES;
-    return parameterNames.map((parameterName) => {
-      const url = new URL(endpoint, this.baseUrl);
-      url.searchParams.set(parameterName, searchTerm);
-      if (source === 'events' || source === 'markets') setGammaDateFilterSearchParams(url, startDate, endDate);
-      if (source === 'markets') {
-        url.searchParams.set('limit', '500');
-        url.searchParams.set('offset', '0');
-      }
-      return url;
+    return parameterNames.flatMap((parameterName) => {
+      return Array.from({ length: maxPagesPerQuery }, (_, pageIndex) => {
+        const page = pageIndex + 1;
+        const url = new URL(endpoint, this.baseUrl);
+        url.searchParams.set(parameterName, searchTerm);
+        url.searchParams.set('page', String(page));
+        if (source === 'events' || source === 'markets') setGammaDateFilterSearchParams(url, startDate, endDate);
+        if (source === 'markets') {
+          const limit = 250;
+          url.searchParams.set('limit', String(limit));
+          url.searchParams.set('offset', String(pageIndex * limit));
+        }
+        return url;
+      });
     });
   }
   private async tryDiscoverWithKeysetPagination(startDate: string, endDate: string): Promise<GammaDiscoveryPageResult | null> {
