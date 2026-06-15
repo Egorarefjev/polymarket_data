@@ -91,6 +91,10 @@ export class CollectorUseCases {
         rejectedMarkets: discoveryResult.rejectedMarkets.length,
         marketsWithoutTarget: discoveryResult.rejectedMarkets.filter((market) => market.rejectionReason === 'target_price_missing').length,
         marketsWithoutTokenIds: discoveryResult.rejectedMarkets.filter((market) => market.rejectionReason === 'token_ids_missing').length,
+        outsideRequestedDateRange: discoveryDebug?.outsideRequestedDateRange ?? discoveryResult.rejectedMarkets.filter((market) => market.rejectionReason === 'outside_requested_date_range').length,
+        hydrationAttempted: discoveryDebug?.hydrationAttempted ?? null,
+        hydrationSucceeded: discoveryDebug?.hydrationSucceeded ?? null,
+        targetPriceMissingAfterHydration: discoveryDebug?.targetPriceMissingAfterHydration ?? discoveryResult.rejectedMarkets.filter((market) => market.rejectionReason === 'target_price_missing').length,
         rawResponsesFetched: discoveryDebug?.rawResponsesFetched ?? null,
         deduplicatedCandidateMarkets: discoveryDebug?.deduplicatedCandidateMarkets ?? rawMarkets.length,
         acceptedByDuration: discoveryDebug?.acceptedByDuration ?? countAcceptedByDuration(discoveryResult.acceptedMarkets),
@@ -479,6 +483,9 @@ function countRejectedByReason(markets: RejectedMarket[]): Record<string, number
     non_up_down_outcomes: 0,
     target_price_missing: 0,
     token_ids_missing: 0,
+    outside_requested_date_range: 0,
+    end_date_missing: 0,
+    non_terminal_market_template: 0,
   };
   for (const market of markets) counts[market.rejectionReason] = (counts[market.rejectionReason] ?? 0) + 1;
   return counts;

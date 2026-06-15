@@ -31,7 +31,7 @@ export interface GammaDiscoveryDebugQuery {
   locallyMatchedMarkets: number;
   acceptedMarketsFromThisQuery: number;
   rejectedMarketsFromThisQuery: number;
-  extractedCandidates: { conditionId?: string | null; marketSlug: string | null; question: string | null; detectedMarketDuration?: DetectedMarketDuration | null; rejectionReason?: string | null }[];
+  extractedCandidates: { conditionId?: string | null; marketSlug: string | null; question: string | null; detectedMarketDuration?: DetectedMarketDuration | null; endDate?: string | null; isWithinRequestedDateRange?: boolean; hasOutcomes?: boolean; hasClobTokenIds?: boolean; hasTargetPriceBeforeHydration?: boolean; hydrationAttempted?: boolean; hydrationSucceeded?: boolean; hasTargetPriceAfterHydration?: boolean; rejectionReason?: string | null }[];
   error?: string;
 }
 
@@ -47,6 +47,10 @@ export interface GammaDiscoveryDebug {
   rejectedMarkets: number;
   acceptedByDuration: Record<MarketDuration, number>;
   rejectedByReason: Record<string, number>;
+  outsideRequestedDateRange: number;
+  hydrationAttempted: number;
+  hydrationSucceeded: number;
+  targetPriceMissingAfterHydration: number;
   stopReason: GammaDiscoveryStopReason;
   queries: GammaDiscoveryDebugQuery[];
 }
@@ -77,6 +81,9 @@ const EMPTY_REJECTED_BY_REASON: Record<string, number> = {
   non_up_down_outcomes: 0,
   target_price_missing: 0,
   token_ids_missing: 0,
+  outside_requested_date_range: 0,
+  end_date_missing: 0,
+  non_terminal_market_template: 0,
 };
 
 
@@ -149,11 +156,11 @@ export class PolymarketGammaApiAdapter {
         const rejected = rejectedByKey.get(key);
         if (accepted !== undefined) acceptedMarketsFromThisQuery += 1;
         if (rejected !== undefined) rejectedMarketsFromThisQuery += 1;
-        return { ...candidate, detectedMarketDuration: accepted?.marketDuration ?? rejected?.detectedMarketDuration ?? candidate.detectedMarketDuration ?? null, rejectionReason: rejected?.rejectionReason ?? null };
+        return { ...candidate, detectedMarketDuration: accepted?.marketDuration ?? rejected?.detectedMarketDuration ?? candidate.detectedMarketDuration ?? null, rejectionReason: rejected?.rejectionReason ?? candidate.rejectionReason ?? null };
       });
       return { ...query, acceptedMarketsFromThisQuery, rejectedMarketsFromThisQuery, extractedCandidates };
     });
-    this.lastDiscoveryDebug = { ...this.lastDiscoveryDebug, acceptedMarkets: discoveryResult.acceptedMarkets.length, rejectedMarkets: discoveryResult.rejectedMarkets.length, acceptedByDuration, rejectedByReason, queries };
+    this.lastDiscoveryDebug = { ...this.lastDiscoveryDebug, acceptedMarkets: discoveryResult.acceptedMarkets.length, rejectedMarkets: discoveryResult.rejectedMarkets.length, acceptedByDuration, rejectedByReason, outsideRequestedDateRange: rejectedByReason['outside_requested_date_range'] ?? 0, hydrationAttempted: queries.flatMap((query) => query.extractedCandidates).filter((candidate) => candidate.hydrationAttempted === true).length, hydrationSucceeded: queries.flatMap((query) => query.extractedCandidates).filter((candidate) => candidate.hydrationSucceeded === true).length, targetPriceMissingAfterHydration: rejectedByReason['target_price_missing'] ?? 0, queries };
     return this.lastDiscoveryDebug;
   }
 
@@ -236,7 +243,8 @@ export class PolymarketGammaApiAdapter {
             successfulResponses += 1;
             pagesFetched += 1;
             const rawItems = topLevelItems(rawResponse);
-            const candidates = extractCandidateMarkets(rawResponse).filter(isBitcoinUpDownMarket);
+            const rawCandidates = extractCandidateMarkets(rawResponse).filter(isBitcoinUpDownMarket);
+            const candidates = await Promise.all(rawCandidates.map((candidate) => this.prepareDiscoveredCandidate(candidate, startDate, endDate, limits.discoveryRequestTimeoutSeconds * 1000)));
             rawMarketsFetched += candidates.length;
             for (const rawMarket of candidates) {
               if (deduplicatedCandidates.size >= limits.discoveryMaxCandidates) break;
@@ -245,7 +253,7 @@ export class PolymarketGammaApiAdapter {
                 earliestFetchedEndTimestamp = earliestFetchedEndTimestamp === null ? endTimestamp : Math.min(earliestFetchedEndTimestamp, endTimestamp);
                 latestFetchedEndTimestamp = latestFetchedEndTimestamp === null ? endTimestamp : Math.max(latestFetchedEndTimestamp, endTimestamp);
               }
-              deduplicatedCandidates.set(deduplicationKey(rawMarket), rawMarket);
+              setPreferredDeduplicatedCandidate(deduplicatedCandidates, rawMarket);
             }
             // eslint-disable-next-line no-console
             console.info(`Discovery response: source=${source} query="${searchTerm}" items=${rawItems.length} candidates=${deduplicatedCandidates.size}`);
@@ -269,8 +277,52 @@ export class PolymarketGammaApiAdapter {
       rawMarketsFetched,
       earliestFetchedEndDate: earliestFetchedEndTimestamp === null ? null : new Date(earliestFetchedEndTimestamp).toISOString(),
       latestFetchedEndDate: latestFetchedEndTimestamp === null ? null : new Date(latestFetchedEndTimestamp).toISOString(),
-      debug: { startDate, endDate, requestedMarketDuration, rawResponsesFetched, candidateMarketsFetched: rawMarketsFetched, deduplicatedCandidateMarkets: deduplicatedCandidates.size, locallyMatchedMarkets: [...deduplicatedCandidates.values()].filter(isBitcoinUpDownMarket).length, acceptedMarkets: 0, rejectedMarkets: 0, acceptedByDuration: { ...EMPTY_ACCEPTED_BY_DURATION }, rejectedByReason: { ...EMPTY_REJECTED_BY_REASON }, stopReason, queries },
+      debug: { startDate, endDate, requestedMarketDuration, rawResponsesFetched, candidateMarketsFetched: rawMarketsFetched, deduplicatedCandidateMarkets: deduplicatedCandidates.size, locallyMatchedMarkets: [...deduplicatedCandidates.values()].filter(isBitcoinUpDownMarket).length, acceptedMarkets: 0, rejectedMarkets: 0, acceptedByDuration: { ...EMPTY_ACCEPTED_BY_DURATION }, rejectedByReason: { ...EMPTY_REJECTED_BY_REASON }, outsideRequestedDateRange: 0, hydrationAttempted: 0, hydrationSucceeded: 0, targetPriceMissingAfterHydration: 0, stopReason, queries },
     };
+  }
+
+
+  private async prepareDiscoveredCandidate(rawMarket: Record<string, unknown>, startDate: string, endDate: string, timeoutMilliseconds: number): Promise<Record<string, unknown>> {
+    let candidate = { ...rawMarket };
+    const endTimestamp = extractTime(candidate, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']);
+    const requestedStart = Date.parse(`${startDate}T00:00:00.000Z`);
+    const requestedEnd = Date.parse(`${endDate}T00:00:00.000Z`);
+    candidate['__isWithinRequestedDateRange'] = endTimestamp !== null && endTimestamp >= requestedStart && endTimestamp < requestedEnd;
+    if (endTimestamp === null) candidate['__discoveryRejectionReason'] = 'end_date_missing';
+    else if (!(candidate['__isWithinRequestedDateRange'] as boolean)) candidate['__discoveryRejectionReason'] = 'outside_requested_date_range';
+
+    candidate['__hasTargetPriceBeforeHydration'] = candidateHasTargetPrice(candidate);
+    const needsHydration = isBitcoinUpDownMarket(candidate) && (hasStringField(candidate, 'slug') || hasStringField(candidate, 'conditionId') || hasStringField(candidate, 'condition_id')) && (!candidateHasTargetPrice(candidate) || !candidateHasOutcomes(candidate) || extractClobTokenIds(candidate).length === 0);
+    candidate['__hydrationAttempted'] = needsHydration;
+    candidate['__hydrationSucceeded'] = false;
+    if (needsHydration) {
+      const hydrated = await this.hydrateMarket(candidate, timeoutMilliseconds);
+      if (hydrated !== null) {
+        const discoveryMetadata = Object.fromEntries(Object.entries(candidate).filter(([key]) => key.startsWith('__')));
+        candidate = { ...mergeHydratedMarket(candidate, hydrated), ...discoveryMetadata };
+        candidate['__hydrationAttempted'] = true;
+        candidate['__hydrationSucceeded'] = true;
+      }
+    }
+    candidate['__hasTargetPriceAfterHydration'] = candidateHasTargetPrice(candidate);
+    return withNonEnumerableDiscoveryMetadata(candidate);
+  }
+
+  private async hydrateMarket(candidate: Record<string, unknown>, timeoutMilliseconds: number): Promise<Record<string, unknown> | null> {
+    const conditionId = stringField(candidate, 'conditionId') ?? stringField(candidate, 'condition_id');
+    const slug = stringField(candidate, 'slug') ?? stringField(candidate, 'marketSlug');
+    const urls: URL[] = [];
+    if (conditionId !== null) { const url = new URL('/markets', this.baseUrl); url.searchParams.set('condition_id', conditionId); urls.push(url); }
+    if (slug !== null) { urls.push(new URL(`/markets/${encodeURIComponent(slug)}`, this.baseUrl)); const url = new URL('/markets', this.baseUrl); url.searchParams.set('slug', slug); urls.push(url); }
+    for (const url of urls) {
+      try {
+        const response = await this.getJsonWithTimeout<unknown>(url, timeoutMilliseconds);
+        const markets = extractCandidateMarkets(response).filter(isBitcoinUpDownMarket);
+        const match = markets.find((market) => (conditionId !== null && (stringField(market, 'conditionId') ?? stringField(market, 'condition_id')) === conditionId) || (slug !== null && (stringField(market, 'slug') ?? stringField(market, 'marketSlug')) === slug)) ?? markets[0];
+        if (match !== undefined) return match;
+      } catch { /* try next hydration route */ }
+    }
+    return null;
   }
 
   private async getJsonWithTimeout<T>(url: URL, timeoutMilliseconds: number): Promise<T> {
@@ -400,6 +452,15 @@ export class PolymarketGammaApiAdapter {
     for (const rawMarket of rawMarkets) {
       const detectedMarketDuration = detectMarketDuration(rawMarket);
       try {
+        const discoveryRejectionReason = typeof rawMarket['__discoveryRejectionReason'] === 'string' ? rawMarket['__discoveryRejectionReason'] : null;
+        if (discoveryRejectionReason === 'end_date_missing' || discoveryRejectionReason === 'outside_requested_date_range') {
+          rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, discoveryRejectionReason, detectedMarketDuration, [discoveryRejectionReason]));
+          continue;
+        }
+        if (isNonTerminalMarketTemplate(rawMarket)) {
+          rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, 'non_terminal_market_template', detectedMarketDuration, ['non_terminal_market_template']));
+          continue;
+        }
         if (!hasBitcoinOrBtcPhrase(rawMarket)) {
           rejectedMarkets.push(buildRejectedRawMarket(rawMarket, rawMarketFilePath, 'not_bitcoin_up_down', detectedMarketDuration, ['not_bitcoin_up_down']));
           continue;
@@ -489,6 +550,10 @@ function normalizeGammaMarket(rawMarket: Record<string, unknown>, marketDuration
       title: rawMarket['title'],
       description: rawMarket['description'],
       rules: rawMarket['rules'],
+      resolutionSource: rawMarket['resolutionSource'],
+      groupItemTitle: rawMarket['groupItemTitle'],
+      eventTitle: nestedStringField(rawMarket['event'], 'title'),
+      eventDescription: nestedStringField(rawMarket['event'], 'description'),
     }),
     winner: determineMarketWinner(rawMarket, outcomes, outcomePrices),
     isResolved: booleanField(rawMarket, 'resolved') ?? booleanField(rawMarket, 'isResolved') ?? booleanField(rawMarket, 'closed') ?? false,
@@ -613,6 +678,59 @@ function deduplicationKey(rawMarket: Record<string, unknown>): string {
 }
 
 
+
+function withNonEnumerableDiscoveryMetadata(candidate: Record<string, unknown>): Record<string, unknown> {
+  for (const [key, value] of Object.entries(candidate)) {
+    if (key.startsWith('__')) Object.defineProperty(candidate, key, { value, enumerable: false, writable: true, configurable: true });
+  }
+  return candidate;
+}
+
+function setPreferredDeduplicatedCandidate(deduplicated: Map<string, Record<string, unknown>>, candidate: Record<string, unknown>): void {
+  const key = deduplicationKey(candidate);
+  const existing = deduplicated.get(key);
+  if (existing === undefined || candidateQualityScore(candidate) >= candidateQualityScore(existing)) deduplicated.set(key, candidate);
+}
+
+function candidateQualityScore(candidate: Record<string, unknown>): number {
+  return (hasStringField(candidate, 'conditionId') || hasStringField(candidate, 'condition_id') ? 32 : 0)
+    + (candidateHasOutcomes(candidate) ? 16 : 0)
+    + (extractClobTokenIds(candidate).length > 0 ? 8 : 0)
+    + (candidateHasTargetPrice(candidate) ? 4 : 0)
+    + (extractTime(candidate, ['startDate', 'startDateIso', 'gameStartTime']) !== null ? 2 : 0)
+    + (extractTime(candidate, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']) !== null ? 2 : 0)
+    + (candidate['__hydrationSucceeded'] === true ? 1 : 0)
+    - (isNonTerminalMarketTemplate(candidate) ? 64 : 0);
+}
+
+function mergeHydratedMarket(candidate: Record<string, unknown>, hydrated: Record<string, unknown>): Record<string, unknown> {
+  return { ...candidate, ...Object.fromEntries(Object.entries(hydrated).filter(([, value]) => value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0))) };
+}
+
+function candidateHasOutcomes(candidate: Record<string, unknown>): boolean {
+  try { return parseOutcomes(candidate['outcomes'] ?? candidate['shortOutcomes'] ?? []).length > 0; } catch { return false; }
+}
+
+function candidateHasTargetPrice(candidate: Record<string, unknown>): boolean {
+  return extractTargetPrice({ targetPrice: candidate['targetPrice'], target: candidate['target'], startPrice: candidate['startPrice'], initialPrice: candidate['initialPrice'], gameStartPrice: candidate['gameStartPrice'], question: candidate['question'], title: candidate['title'], description: candidate['description'], rules: candidate['rules'], resolutionSource: candidate['resolutionSource'], groupItemTitle: candidate['groupItemTitle'], eventTitle: nestedStringField(candidate['event'], 'title'), eventDescription: nestedStringField(candidate['event'], 'description') }) !== null;
+}
+
+function hasStringField(record: Record<string, unknown>, fieldName: string): boolean {
+  return typeof record[fieldName] === 'string' && record[fieldName].length > 0;
+}
+
+function isNonTerminalMarketTemplate(rawMarket: Record<string, unknown>): boolean {
+  if (hasStringField(rawMarket, 'conditionId') || hasStringField(rawMarket, 'condition_id') || candidateHasOutcomes(rawMarket) || extractClobTokenIds(rawMarket).length > 0) return false;
+  const text = buildSearchableMarketText(rawMarket);
+  return /\b(?:btc|bitcoin)\s+up\s*(?:or\s*)?\/?down\s+(?:hourly|4h|daily)\b/u.test(text);
+}
+
+function nestedStringField(value: unknown, fieldName: string): string | undefined {
+  if (isRecord(value) && typeof value[fieldName] === 'string') return value[fieldName];
+  if (Array.isArray(value)) return value.map((entry) => nestedStringField(entry, fieldName)).find((entry): entry is string => typeof entry === 'string');
+  return undefined;
+}
+
 function buildDebugQuery(source: GammaDiscoverySource, queryTerm: string, url: URL, rawItemsFetched: number, candidates: Record<string, unknown>[]): GammaDiscoveryDebugQuery {
   return {
     source,
@@ -628,9 +746,21 @@ function buildDebugQuery(source: GammaDiscoverySource, queryTerm: string, url: U
       marketSlug: typeof candidate['slug'] === 'string' ? candidate['slug'] : typeof candidate['marketSlug'] === 'string' ? candidate['marketSlug'] : null,
       question: typeof candidate['question'] === 'string' ? candidate['question'] : typeof candidate['title'] === 'string' ? candidate['title'] : null,
       detectedMarketDuration: detectMarketDuration(candidate),
-      rejectionReason: null,
+      endDate: timestampToIso(extractTime(candidate, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime'])),
+      isWithinRequestedDateRange: candidate['__isWithinRequestedDateRange'] === true,
+      hasOutcomes: candidateHasOutcomes(candidate),
+      hasClobTokenIds: extractClobTokenIds(candidate).length > 0,
+      hasTargetPriceBeforeHydration: candidate['__hasTargetPriceBeforeHydration'] === true,
+      hydrationAttempted: candidate['__hydrationAttempted'] === true,
+      hydrationSucceeded: candidate['__hydrationSucceeded'] === true,
+      hasTargetPriceAfterHydration: candidate['__hasTargetPriceAfterHydration'] === true,
+      rejectionReason: typeof candidate['__discoveryRejectionReason'] === 'string' ? candidate['__discoveryRejectionReason'] : null,
     })),
   };
+}
+
+function timestampToIso(timestamp: number | null): string | null {
+  return timestamp === null ? null : new Date(timestamp).toISOString();
 }
 
 function topLevelItems(value: unknown): unknown[] {

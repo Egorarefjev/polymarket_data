@@ -76,6 +76,55 @@ describe('Gamma discovery pagination and filters', () => {
 
 
 
+
+
+  it('locally rejects discovered candidates outside requested end-date range and with missing end dates', async () => {
+    const inside = { ...gammaMarket(10), outcomes: ['Up', 'Down'], clobTokenIds: ['up', 'down'], targetPrice: '100000' };
+    const outside = { ...inside, slug: 'bitcoin-up-down-june', endDate: '2026-06-14T12:00:00.000Z' };
+    const missingEnd = { ...inside, slug: 'bitcoin-up-down-missing-end', endDate: undefined };
+    const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([[outside, missingEnd, inside]]) as never, 'https://example.test');
+    const markets = await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: '1h', discoveryMaxTotalRequests: 1 });
+    const result = adapter.parseMarkets(markets, '/tmp/raw.json', '1h');
+    expect(result.acceptedMarkets.map((market) => market.marketSlug)).toEqual(['bitcoin-up-down-hourly-10']);
+    expect(result.rejectedMarkets.map((market) => market.rejectionReason)).toEqual(['outside_requested_date_range', 'end_date_missing']);
+  });
+
+  it('hydrates shallow search candidates by slug before validation', async () => {
+    const shallow = { slug: 'bitcoin-up-or-down-april-30-2026-7pm-et', question: 'Bitcoin Up or Down - April 30, 7PM ET', startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-05-01T01:00:00.000Z' };
+    const hydrated = { ...shallow, description: 'The starting price of Bitcoin is $100,000.', outcomes: ['Up', 'Down'], outcomePrices: ['1', '0'], clobTokenIds: ['up-token', 'down-token'], conditionId: '0xabc' };
+    const httpClient = new MockHttpClient([[shallow], hydrated]);
+    const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
+    const markets = await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: 'all', discoveryMaxTotalRequests: 1 });
+    const result = adapter.parseMarkets(markets, '/tmp/raw.json', 'all');
+    expect(result.acceptedMarkets).toHaveLength(1);
+    expect(result.acceptedMarkets[0]).toMatchObject({ marketSlug: shallow.slug, conditionId: '0xabc', targetPrice: 100000, upTokenId: 'up-token', downTokenId: 'down-token' });
+    const debugCandidate = adapter.getLastDiscoveryDebug()?.queries[0]?.extractedCandidates[0];
+    expect(debugCandidate).toMatchObject({ hydrationAttempted: true, hydrationSucceeded: true, hasTargetPriceBeforeHydration: false, hasTargetPriceAfterHydration: true });
+  });
+
+  it('prefers rich duplicates over shallow/template candidates and rejects standalone templates', async () => {
+    const template = { slug: 'btc-up-or-down-hourly', title: 'BTC Up or Down Hourly', startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-05-01T01:00:00.000Z' };
+    const shallow = { slug: 'bitcoin-up-down-hourly-77', question: 'Bitcoin Up or Down - target price $100,000', startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-05-01T01:00:00.000Z' };
+    const rich = { ...shallow, conditionId: '0xrich', outcomes: ['Up', 'Down'], clobTokenIds: ['up-rich', 'down-rich'] };
+    const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([[template, rich, shallow]]) as never, 'https://example.test');
+    const markets = await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: '1h', discoveryMaxTotalRequests: 1 });
+    const result = adapter.parseMarkets(markets, '/tmp/raw.json', '1h');
+    expect(result.acceptedMarkets).toHaveLength(1);
+    expect(result.acceptedMarkets[0]).toMatchObject({ conditionId: '0xrich', upTokenId: 'up-rich' });
+    expect(result.rejectedMarkets[0]?.rejectionReason).toBe('non_terminal_market_template');
+  });
+
+  it('extracts nested real markets from event/template containers and excludes valid markets outside requested dates', async () => {
+    const nested = { ...gammaMarket(88), outcomes: ['Up', 'Down'], clobTokenIds: ['up', 'down'], description: 'BTC price at the start of the market: $100,000' };
+    const june = { ...nested, slug: 'btc-updown-4h-1781438400', question: 'Bitcoin Up or Down - June 14, 8:00AM-12:00PM ET', startDate: '2026-06-14T12:00:00.000Z', endDate: '2026-06-14T16:00:00.000Z' };
+    const response = { series: [{ slug: 'btc-up-or-down-hourly', title: 'BTC Up or Down Hourly', markets: [nested, june] }] };
+    const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([response]) as never, 'https://example.test');
+    const markets = await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: 'all', discoveryMaxTotalRequests: 1 });
+    const result = adapter.parseMarkets(markets, '/tmp/raw.json', 'all');
+    expect(result.acceptedMarkets.map((market) => market.marketSlug)).toEqual(['bitcoin-up-down-hourly-88']);
+    expect(result.rejectedMarkets.map((market) => market.rejectionReason)).toContain('outside_requested_date_range');
+  });
+
   it('respects max pages per source/query', async () => {
     const httpClient = new MockHttpClient(Array.from({ length: 20 }, () => []));
     const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
