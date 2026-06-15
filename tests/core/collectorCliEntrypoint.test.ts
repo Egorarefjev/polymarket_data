@@ -1,4 +1,5 @@
 import { readFile, rm } from 'node:fs/promises';
+import { runNpmCommand } from '../helpers/runNpmCommand.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { CollectorOptions, CollectorUseCases } from '../../src/application/collectorUseCases.js';
 import { createCollectorProgram, type CollectorCliDependencies } from '../../src/cli/createCollectorProgram.js';
@@ -148,8 +149,11 @@ describe('collector package scripts', () => {
 
   it('doctor smoke command runs through npm script without import.meta.url guard', async () => {
     await rm('data', { recursive: true, force: true });
-    const { spawnSync } = await import('node:child_process');
-    const result = spawnSync('npm', ['run', 'collector', '--', 'doctor'], { encoding: 'utf8' });
+    const result = runNpmCommand(['run', 'collector', '--', 'doctor']);
+
+    if (result.error) {
+      throw result.error;
+    }
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Starting command: doctor');
