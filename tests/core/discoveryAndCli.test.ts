@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { runNpmCommand } from '../helpers/runNpmCommand.js';
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it, vi } from 'vitest';
 import { PolymarketGammaApiAdapter } from '../../src/adapters/polymarketGammaApi.js';
@@ -182,27 +182,33 @@ describe('CLOB fidelity units', () => {
 
 describe('collector CLI validation', () => {
   it('accepts one-minute price fidelity', () => {
-    const result = spawnSync('npx', ['tsx', 'src/cli/collector.ts', 'discover', '--price-fidelity-minutes', '1', '--help'], {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-    });
+    const result = runNpmCommand(['run', 'collector', '--', 'discover', '--price-fidelity-minutes', '1', '--help']);
+
+    if (result.error) {
+      throw result.error;
+    }
+
     expect(result.status).toBe(0);
   });
 
   it('rejects price fidelity below one minute', () => {
-    const result = spawnSync('npx', ['tsx', 'src/cli/collector.ts', 'discover', '--start-date', '2026-05-01', '--end-date', '2026-05-02', '--price-fidelity-minutes', '0'], {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-    });
+    const result = runNpmCommand(['run', 'collector', '--', 'discover', '--start-date', '2026-05-01', '--end-date', '2026-05-02', '--price-fidelity-minutes', '0']);
+
+    if (result.error) {
+      throw result.error;
+    }
+
     expect(result.status).not.toBe(0);
     expect(`${result.stderr}${result.stdout}`).toContain('--price-fidelity-minutes must be a number greater than or equal to 1');
   });
 
   it('rejects removed price-fidelity-seconds alias as an unknown option', () => {
-    const result = spawnSync('npx', ['tsx', 'src/cli/collector.ts', 'discover', '--start-date', '2026-05-01', '--end-date', '2026-05-02', '--price-fidelity-seconds', '5'], {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-    });
+    const result = runNpmCommand(['run', 'collector', '--', 'discover', '--start-date', '2026-05-01', '--end-date', '2026-05-02', '--price-fidelity-seconds', '5']);
+
+    if (result.error) {
+      throw result.error;
+    }
+
     expect(result.status).not.toBe(0);
     expect(`${result.stderr}${result.stdout}`).toContain("unknown option '--price-fidelity-seconds'");
   });
