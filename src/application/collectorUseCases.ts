@@ -2,7 +2,7 @@ import pLimit from 'p-limit';
 import type { FileStorage } from '../adapters/fileStorage.js';
 import type { LocalParquetWriter } from '../adapters/parquetWriter.js';
 import { serializeDataQualityFlags } from '../adapters/parquetWriter.js';
-import { isBitcoinUpDownMarket, type PolymarketGammaApiAdapter } from '../adapters/polymarketGammaApi.js';
+import { isBitcoinUpDownMarket, type GammaDiscoveryOptions, type PolymarketGammaApiAdapter } from '../adapters/polymarketGammaApi.js';
 import type { PolymarketClobApiAdapter } from '../adapters/polymarketClobApi.js';
 import type { BinanceArchiveApiAdapter, BinanceDataType, BinanceMarketType } from '../adapters/binanceArchiveApi.js';
 import type { ExternalPriceSource } from '../adapters/externalPriceSource.js';
@@ -31,6 +31,12 @@ export interface CollectorOptions {
   writeDebugJson: boolean;
   allowBroadGammaDateScan: boolean;
   allowEmptyMarketSet: boolean;
+  discoveryTimeoutSeconds?: number;
+  discoveryMaxPagesPerQuery?: number;
+  discoveryMaxTotalRequests?: number;
+  discoveryMaxCandidates?: number;
+  discoveryRequestTimeoutSeconds?: number;
+  discoveryExpandedSearch?: boolean;
 }
 
 export interface BuildDatasetResult {
@@ -65,7 +71,7 @@ export class CollectorUseCases {
 
     const rawMarkets = (await this.fileStorage.exists(rawGammaFilePath)) && !options.force
       ? await this.fileStorage.readJson<Record<string, unknown>[]>(rawGammaFilePath)
-      : await this.gammaApiAdapter.discoverBitcoinUpDownMarkets(options.startDate, options.endDate, { allowBroadGammaDateScan: options.allowBroadGammaDateScan, requestedMarketDuration: options.marketDuration });
+      : await this.gammaApiAdapter.discoverBitcoinUpDownMarkets(options.startDate, options.endDate, buildGammaDiscoveryOptions(options));
     await this.fileStorage.writeJson(rawGammaFilePath, rawMarkets, options.force);
 
     const discoveryResult = this.gammaApiAdapter.parseMarkets(rawMarkets, this.fileStorage.resolve(rawGammaFilePath), options.marketDuration);
@@ -351,6 +357,21 @@ export function determinePrimaryPriceMode(options: Pick<CollectorOptions, 'chain
   }
   if (options.allowProxyPrimaryPriceSourceForDebug === true) return { mode: 'binance_proxy_debug', primaryPricePoints: [] };
   throw new Error('Chainlink input is required for official dataset build. Provide --chainlink-input-file or use --allow-proxy-primary-price-source-for-debug true for non-official proxy testing.');
+}
+
+
+function buildGammaDiscoveryOptions(options: CollectorOptions): GammaDiscoveryOptions {
+  const discoveryOptions: GammaDiscoveryOptions = {
+    allowBroadGammaDateScan: options.allowBroadGammaDateScan,
+    requestedMarketDuration: options.marketDuration,
+  };
+  if (options.discoveryTimeoutSeconds !== undefined) discoveryOptions.discoveryTimeoutSeconds = options.discoveryTimeoutSeconds;
+  if (options.discoveryMaxPagesPerQuery !== undefined) discoveryOptions.discoveryMaxPagesPerQuery = options.discoveryMaxPagesPerQuery;
+  if (options.discoveryMaxTotalRequests !== undefined) discoveryOptions.discoveryMaxTotalRequests = options.discoveryMaxTotalRequests;
+  if (options.discoveryMaxCandidates !== undefined) discoveryOptions.discoveryMaxCandidates = options.discoveryMaxCandidates;
+  if (options.discoveryRequestTimeoutSeconds !== undefined) discoveryOptions.discoveryRequestTimeoutSeconds = options.discoveryRequestTimeoutSeconds;
+  if (options.discoveryExpandedSearch !== undefined) discoveryOptions.discoveryExpandedSearch = options.discoveryExpandedSearch;
+  return discoveryOptions;
 }
 
 export function shouldDownloadBinanceDuringFullPipeline(options: Pick<CollectorOptions, 'includeBinanceSecondarySignal' | 'allowProxyPrimaryPriceSourceForDebug' | 'chainlinkInputFile'>): boolean {

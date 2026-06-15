@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PolymarketGammaApiAdapter } from '../../src/adapters/polymarketGammaApi.js';
 import { PolymarketClobApiAdapter } from '../../src/adapters/polymarketClobApi.js';
 import { detectMarketDuration, durationSpecificBitcoinUpDownSearchTerms, findTokenIdForOutcome, hasExplicitUpDownOutcomes, isBitcoinUpDownMarket, isRequestedMarketDuration } from '../../src/adapters/polymarketGammaApi.js';
@@ -43,7 +43,7 @@ describe('Gamma discovery pagination and filters', () => {
     const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
     const markets = await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: '1h' });
     expect(markets).toEqual([market]);
-    expect(adapter.getLastDiscoveryDebug()?.queries.slice(0, 3).map((query) => query.source)).toEqual(['public-search', 'public-search', 'public-search']);
+    expect(adapter.getLastDiscoveryDebug()?.queries.slice(0, 3).map((query) => query.source)).toEqual(['public-search', 'public-search', 'events']);
     expect(adapter.getLastDiscoveryDebug()?.queries.some((query) => query.candidateMarketsExtracted === 1)).toBe(true);
   });
   it('passes server-side BTC Up/Down query and end-date filters to Gamma API', async () => {
@@ -74,8 +74,94 @@ describe('Gamma discovery pagination and filters', () => {
     expect(httpClient.urls.some((url) => url.pathname === '/markets')).toBe(true);
   });
 
+
+
+  it('respects max pages per source/query', async () => {
+    const httpClient = new MockHttpClient(Array.from({ length: 20 }, () => []));
+    const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
+    await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: '1h', discoveryMaxPagesPerQuery: 1 });
+    const counts = new Map<string, number>();
+    for (const url of httpClient.urls) {
+      const key = `${url.pathname}:${url.searchParams.get('q')}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    expect([...counts.values()].every((count) => count <= 1)).toBe(true);
+  });
+
+  it('respects max total requests', async () => {
+    const httpClient = new MockHttpClient(Array.from({ length: 20 }, () => []));
+    const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
+    await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: '1h', discoveryMaxTotalRequests: 3 });
+    expect(httpClient.urls).toHaveLength(3);
+    expect(adapter.getLastDiscoveryDebug()?.stopReason).toBe('max_total_requests');
+  });
+
+
+
+  it('respects max total candidate markets', async () => {
+    const httpClient = new MockHttpClient([[gammaMarket(1), gammaMarket(2), gammaMarket(3)]]);
+    const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
+    const markets = await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: '1h', discoveryMaxCandidates: 2 });
+    expect(markets).toHaveLength(2);
+    expect(adapter.getLastDiscoveryDebug()?.stopReason).toBe('max_candidates');
+  });
+
+  it('respects per-request timeout and logs failed request context', async () => {
+    class HangingHttpClient {
+      public urls: URL[] = [];
+      public async getJson<T>(url: URL): Promise<T> {
+        this.urls.push(url);
+        return new Promise<T>(() => undefined);
+      }
+    }
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    try {
+      const adapter = new PolymarketGammaApiAdapter(new HangingHttpClient() as never, 'https://example.test');
+      await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: '1h', discoveryMaxTotalRequests: 1, discoveryRequestTimeoutSeconds: 1 });
+      expect(info.mock.calls.some((call) => String(call[0]).includes('source=public-search') && String(call[0]).includes('query="btc updown 1h"') && String(call[0]).includes('url=https://example.test/public-search'))).toBe(true);
+    } finally {
+      info.mockRestore();
+    }
+  }, 3_000);
+
+  it('uses prioritized small all-duration query set by default', async () => {
+    const httpClient = new MockHttpClient(Array.from({ length: 100 }, () => []));
+    const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
+    await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: 'all' });
+    const queries = new Set(httpClient.urls.map((url) => url.searchParams.get('q')));
+    expect([...queries]).toEqual(['btc updown 1h', 'bitcoin up or down hourly', 'btc updown 4h', 'bitcoin up or down 4h', 'btc updown daily', 'bitcoin up or down daily']);
+    expect([...queries]).not.toContain('btc-updown-1h');
+  });
+
+  it('runs expanded search only when requested and prioritized search finds zero candidates', async () => {
+    const defaultHttpClient = new MockHttpClient(Array.from({ length: 100 }, () => []));
+    const defaultAdapter = new PolymarketGammaApiAdapter(defaultHttpClient as never, 'https://example.test');
+    await defaultAdapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: '1h' });
+    expect(defaultHttpClient.urls.some((url) => url.searchParams.get('q') === 'btc-updown-1h')).toBe(false);
+
+    const expandedHttpClient = new MockHttpClient(Array.from({ length: 100 }, () => []));
+    const expandedAdapter = new PolymarketGammaApiAdapter(expandedHttpClient as never, 'https://example.test');
+    await expandedAdapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: '1h', discoveryExpandedSearch: true, discoveryMaxTotalRequests: 200 });
+    expect(expandedHttpClient.urls.some((url) => url.searchParams.get('q') === 'btc-updown-1h')).toBe(true);
+  });
+
+  it('logs discovery progress and stop reason', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    try {
+      const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([[]]) as never, 'https://example.test');
+      await adapter.discoverBitcoinUpDownMarkets('2026-05-01', '2026-05-02', { requestedMarketDuration: '1h', discoveryMaxTotalRequests: 1 });
+      const messages = info.mock.calls.map((call) => String(call[0]));
+      expect(messages.some((message) => message.includes('Discovery request: source=public-search query="btc updown 1h" page=1'))).toBe(true);
+      expect(messages.some((message) => message.includes('Discovery response: source=public-search query="btc updown 1h" items=0 candidates=0'))).toBe(true);
+      expect(messages.some((message) => message.includes('Discovery stopped: reason=max_total_requests'))).toBe(true);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+
   it('allows broad date scan only when explicitly enabled and flags broad candidates', async () => {
-    const emptySearchResponses = Array.from({ length: 117 }, () => []);
+    const emptySearchResponses = Array.from({ length: 16 }, () => []);
     const broadMarket = { slug: 'chicago-first-snowfall', question: 'Will Chicago record the first snowfall?', startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-05-01T01:00:00.000Z' };
     const httpClient = new MockHttpClient([...emptySearchResponses, { markets: [broadMarket] }]);
     const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');

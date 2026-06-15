@@ -79,6 +79,12 @@ export function parseOptions(rawOptions: Record<string, unknown>): CollectorOpti
   const writeDebugJson = String(rawOptions['writeDebugJson']).toLowerCase() === 'true';
   const allowBroadGammaDateScan = String(rawOptions['allowBroadGammaDateScan']).toLowerCase() === 'true';
   const allowEmptyMarketSet = String(rawOptions['allowEmptyMarketSet']).toLowerCase() === 'true';
+  const discoveryTimeoutSeconds = parsePositiveIntegerOption(rawOptions, 'discoveryTimeoutSeconds', '--discovery-timeout-seconds');
+  const discoveryMaxPagesPerQuery = parsePositiveIntegerOption(rawOptions, 'discoveryMaxPagesPerQuery', '--discovery-max-pages-per-query');
+  const discoveryMaxTotalRequests = parsePositiveIntegerOption(rawOptions, 'discoveryMaxTotalRequests', '--discovery-max-total-requests');
+  const discoveryMaxCandidates = parsePositiveIntegerOption(rawOptions, 'discoveryMaxCandidates', '--discovery-max-candidates');
+  const discoveryRequestTimeoutSeconds = parsePositiveIntegerValue(rawOptions['discoveryRequestTimeoutSeconds'] ?? rawOptions['gammaRequestTimeoutSeconds'] ?? '10', '--discovery-request-timeout-seconds');
+  const discoveryExpandedSearch = String(rawOptions['discoveryExpandedSearch']).toLowerCase() === 'true';
   const chainlinkInputFile = rawOptions['chainlinkInputFile'] === undefined ? undefined : String(rawOptions['chainlinkInputFile']);
   const options: CollectorOptions = {
     startDate,
@@ -97,6 +103,12 @@ export function parseOptions(rawOptions: Record<string, unknown>): CollectorOpti
     writeDebugJson,
     allowBroadGammaDateScan,
     allowEmptyMarketSet,
+    discoveryTimeoutSeconds,
+    discoveryMaxPagesPerQuery,
+    discoveryMaxTotalRequests,
+    discoveryMaxCandidates,
+    discoveryRequestTimeoutSeconds,
+    discoveryExpandedSearch,
   };
   if (chainlinkInputFile !== undefined) options.chainlinkInputFile = chainlinkInputFile;
   return options;
@@ -135,7 +147,14 @@ function addSharedOptions(command: Command): Command {
     .option('--include-binance-secondary-signal <trueOrFalse>', 'Include Binance as optional secondary predictive signal', 'false')
     .option('--write-debug-json <trueOrFalse>', 'Write large debug JSON mirrors for small sample runs only', 'false')
     .option('--allow-broad-gamma-date-scan <trueOrFalse>', 'Debug only: allow broad Gamma date scan fallback when query discovery returns zero candidates', 'false')
-    .option('--allow-empty-market-set <trueOrFalse>', 'Debug only: continue all pipeline when discovery accepts zero markets', 'false');
+    .option('--allow-empty-market-set <trueOrFalse>', 'Debug only: continue all pipeline when discovery accepts zero markets', 'false')
+    .option('--discovery-timeout-seconds <seconds>', 'Maximum discovery runtime per command', '60')
+    .option('--discovery-max-pages-per-query <count>', 'Maximum Gamma pages per discovery source/query', '2')
+    .option('--discovery-max-total-requests <count>', 'Maximum total Gamma requests per discovery command', '50')
+    .option('--discovery-max-candidates <count>', 'Maximum total candidate markets per discovery command', '500')
+    .option('--discovery-request-timeout-seconds <seconds>', 'Timeout for each Gamma HTTP request', '10')
+    .option('--gamma-request-timeout-seconds <seconds>', 'Deprecated alias for --discovery-request-timeout-seconds')
+    .option('--discovery-expanded-search <trueOrFalse>', 'Try expanded BTC Up/Down query set after prioritized queries return zero candidates', 'false');
 }
 
 async function runDoctorAction(dependencies: CollectorCliDependencies, logger: CollectorCliLogger): Promise<void> {
@@ -155,6 +174,17 @@ async function runDoctorAction(dependencies: CollectorCliDependencies, logger: C
     logger.error(formatCliError(error));
     throw error;
   }
+}
+
+function parsePositiveIntegerOption(rawOptions: Record<string, unknown>, camelName: string, flagName: string): number {
+  const defaults: Record<string, string> = { discoveryTimeoutSeconds: '60', discoveryMaxPagesPerQuery: '2', discoveryMaxTotalRequests: '50', discoveryMaxCandidates: '500' };
+  return parsePositiveIntegerValue(rawOptions[camelName] ?? defaults[camelName], flagName);
+}
+
+function parsePositiveIntegerValue(rawValue: unknown, flagName: string): number {
+  const value = Number(rawValue);
+  if (!Number.isFinite(value) || value < 1 || !Number.isInteger(value)) throw new Error(`${flagName} must be a positive integer`);
+  return value;
 }
 
 function logCommandStart(logger: CollectorCliLogger, commandName: string, options: CollectorOptions): void {
