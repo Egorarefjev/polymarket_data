@@ -44,6 +44,9 @@ export interface TargetPriceSource {
   eventTitle?: unknown;
   eventDescription?: unknown;
   gameStartPrice?: unknown;
+  priceToBeat?: unknown;
+  eventMetadataPriceToBeat?: unknown;
+  nestedEventMetadataPriceToBeat?: unknown;
 }
 
 export function extractTargetPrice(targetPriceSource: TargetPriceSource): number | null {
@@ -53,6 +56,9 @@ export function extractTargetPrice(targetPriceSource: TargetPriceSource): number
     targetPriceSource.startPrice,
     targetPriceSource.initialPrice,
     targetPriceSource.gameStartPrice,
+    targetPriceSource.priceToBeat,
+    targetPriceSource.eventMetadataPriceToBeat,
+    targetPriceSource.nestedEventMetadataPriceToBeat,
   ]) {
     const explicitTargetPrice = parsePotentialPrice(explicitValue);
     if (explicitTargetPrice !== null) {
