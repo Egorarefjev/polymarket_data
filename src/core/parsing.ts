@@ -39,6 +39,10 @@ export interface TargetPriceSource {
   title?: unknown;
   description?: unknown;
   rules?: unknown;
+  resolutionSource?: unknown;
+  groupItemTitle?: unknown;
+  eventTitle?: unknown;
+  eventDescription?: unknown;
   gameStartPrice?: unknown;
 }
 
@@ -61,6 +65,10 @@ export function extractTargetPrice(targetPriceSource: TargetPriceSource): number
     targetPriceSource.title,
     targetPriceSource.description,
     targetPriceSource.rules,
+    targetPriceSource.resolutionSource,
+    targetPriceSource.groupItemTitle,
+    targetPriceSource.eventTitle,
+    targetPriceSource.eventDescription,
   ]
     .filter((value): value is string => typeof value === 'string')
     .join('\n');
@@ -68,7 +76,9 @@ export function extractTargetPrice(targetPriceSource: TargetPriceSource): number
   // Polymarket crypto questions vary over time. These patterns intentionally require
   // start/target price language so random dates or market ids are not treated as BTC prices.
   const targetPricePatterns = [
-    /(?:target|start(?:ing)?|open(?:ing)?|initial)\s*(?:price|value|level)?[^$0-9]{0,30}\$?([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]{4,6}(?:\.[0-9]+)?)/iu,
+    /(?:target|start(?:ing)?|open(?:ing)?|initial)\s*(?:price|value|level)?[^$0-9]{0,50}\$?([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]{4,6}(?:\.[0-9]+)?)/iu,
+    /(?:bitcoin|btc)\s+price\s+at\s+(?:the\s+)?(?:start|open(?:ing)?)\D{0,50}\$?([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]{4,6}(?:\.[0-9]+)?)/iu,
+    /price\s+of\s+(?:bitcoin|btc)\s+at\s+(?:market\s+)?start\D{0,50}\$?([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]{4,6}(?:\.[0-9]+)?)/iu,
     /\$([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]{4,6}(?:\.[0-9]+)?)\s*(?:target|start(?:ing)?|open(?:ing)?|initial)/iu,
     /(?:above|below|higher|lower|up or down|up\/down)[^$0-9]{0,80}\$([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]{4,6}(?:\.[0-9]+)?)/iu,
   ];
