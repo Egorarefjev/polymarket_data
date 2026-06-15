@@ -248,7 +248,7 @@ export class PolymarketGammaApiAdapter {
             rawMarketsFetched += candidates.length;
             for (const rawMarket of candidates) {
               if (deduplicatedCandidates.size >= limits.discoveryMaxCandidates) break;
-              const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']);
+              const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']);
               if (endTimestamp !== null) {
                 earliestFetchedEndTimestamp = earliestFetchedEndTimestamp === null ? endTimestamp : Math.min(earliestFetchedEndTimestamp, endTimestamp);
                 latestFetchedEndTimestamp = latestFetchedEndTimestamp === null ? endTimestamp : Math.max(latestFetchedEndTimestamp, endTimestamp);
@@ -284,7 +284,7 @@ export class PolymarketGammaApiAdapter {
 
   private async prepareDiscoveredCandidate(rawMarket: Record<string, unknown>, startDate: string, endDate: string, timeoutMilliseconds: number): Promise<Record<string, unknown>> {
     let candidate = { ...rawMarket };
-    const endTimestamp = extractTime(candidate, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']);
+    const endTimestamp = extractTime(candidate, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']);
     const requestedStart = Date.parse(`${startDate}T00:00:00.000Z`);
     const requestedEnd = Date.parse(`${endDate}T00:00:00.000Z`);
     candidate['__isWithinRequestedDateRange'] = endTimestamp !== null && endTimestamp >= requestedStart && endTimestamp < requestedEnd;
@@ -380,7 +380,7 @@ export class PolymarketGammaApiAdapter {
         pagesFetched += 1;
         rawMarketsFetched += rawMarkets.length;
         for (const rawMarket of rawMarkets) {
-          const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']);
+          const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']);
           if (endTimestamp !== null) {
             earliestFetchedEndTimestamp = earliestFetchedEndTimestamp === null ? endTimestamp : Math.min(earliestFetchedEndTimestamp, endTimestamp);
             latestFetchedEndTimestamp = latestFetchedEndTimestamp === null ? endTimestamp : Math.max(latestFetchedEndTimestamp, endTimestamp);
@@ -422,7 +422,7 @@ export class PolymarketGammaApiAdapter {
       pagesFetched += 1;
       rawMarketsFetched += rawMarkets.length;
       for (const rawMarket of rawMarkets) {
-        const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']);
+        const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']);
         if (endTimestamp !== null) {
           earliestFetchedEndTimestamp = earliestFetchedEndTimestamp === null ? endTimestamp : Math.min(earliestFetchedEndTimestamp, endTimestamp);
           latestFetchedEndTimestamp = latestFetchedEndTimestamp === null ? endTimestamp : Math.max(latestFetchedEndTimestamp, endTimestamp);
@@ -525,8 +525,8 @@ function normalizeGammaMarket(rawMarket: Record<string, unknown>, marketDuration
   const tokenIds = extractClobTokenIds(rawMarket);
   const upTokenId = findTokenIdForOutcome(outcomes, tokenIds, 'up');
   const downTokenId = findTokenIdForOutcome(outcomes, tokenIds, 'down');
-  const marketStartTimestampMilliseconds = extractTime(rawMarket, ['startDate', 'startDateIso', 'gameStartTime', 'createdAt']) ?? 0;
-  const marketEndTimestampMilliseconds = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']) ?? 0;
+  const marketStartTimestampMilliseconds = extractTime(rawMarket, ['eventStartTime', 'startTime', 'gameStartTime', 'startDate', 'startDateIso', 'createdAt']) ?? 0;
+  const marketEndTimestampMilliseconds = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']) ?? 0;
   const question = stringField(rawMarket, 'question') ?? stringField(rawMarket, 'title') ?? '';
 
   if (question.length === 0) throw new MarketParsingError('question_missing');
@@ -546,6 +546,9 @@ function normalizeGammaMarket(rawMarket: Record<string, unknown>, marketDuration
       startPrice: rawMarket['startPrice'],
       initialPrice: rawMarket['initialPrice'],
       gameStartPrice: rawMarket['gameStartPrice'],
+      priceToBeat: rawMarket['priceToBeat'],
+      eventMetadataPriceToBeat: findFirstNestedFieldValue(rawMarket['eventMetadata'], 'priceToBeat'),
+      nestedEventMetadataPriceToBeat: findFirstNestedFieldValue(rawMarket['event'], 'priceToBeat') ?? findFirstNestedFieldValue(rawMarket['events'], 'priceToBeat') ?? findFirstNestedFieldValue(rawMarket, 'priceToBeat'),
       question,
       title: rawMarket['title'],
       description: rawMarket['description'],
@@ -607,7 +610,7 @@ function hasUnsupportedDurationSignal(rawMarket: Record<string, unknown>): boole
 }
 
 function detectMarketDurationFromTimestamps(rawMarket: Record<string, unknown>): DetectedMarketDuration | null {
-  const startTimestamp = extractTime(rawMarket, ['startDate', 'startDateIso', 'gameStartTime', 'eventStartTime', 'startTime']);
+  const startTimestamp = extractTime(rawMarket, ['eventStartTime', 'startTime', 'gameStartTime', 'startDate', 'startDateIso']);
   const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']);
   if (startTimestamp === null || endTimestamp === null) return null;
   const durationMilliseconds = endTimestamp - startTimestamp;
@@ -621,7 +624,7 @@ function detectMarketDurationFromTimestamps(rawMarket: Record<string, unknown>):
 }
 
 function detectUnsupportedDurationFromTimestamps(rawMarket: Record<string, unknown>): boolean {
-  const startTimestamp = extractTime(rawMarket, ['startDate', 'startDateIso', 'gameStartTime', 'eventStartTime', 'startTime']);
+  const startTimestamp = extractTime(rawMarket, ['eventStartTime', 'startTime', 'gameStartTime', 'startDate', 'startDateIso']);
   const endTimestamp = extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']);
   if (startTimestamp === null || endTimestamp === null) return false;
   const durationMilliseconds = endTimestamp - startTimestamp;
@@ -697,8 +700,8 @@ function candidateQualityScore(candidate: Record<string, unknown>): number {
     + (candidateHasOutcomes(candidate) ? 16 : 0)
     + (extractClobTokenIds(candidate).length > 0 ? 8 : 0)
     + (candidateHasTargetPrice(candidate) ? 4 : 0)
-    + (extractTime(candidate, ['startDate', 'startDateIso', 'gameStartTime']) !== null ? 2 : 0)
-    + (extractTime(candidate, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime']) !== null ? 2 : 0)
+    + (extractTime(candidate, ['eventStartTime', 'startTime', 'gameStartTime', 'startDate', 'startDateIso']) !== null ? 2 : 0)
+    + (extractTime(candidate, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']) !== null ? 2 : 0)
     + (candidate['__hydrationSucceeded'] === true ? 1 : 0)
     - (isNonTerminalMarketTemplate(candidate) ? 64 : 0);
 }
@@ -712,7 +715,7 @@ function candidateHasOutcomes(candidate: Record<string, unknown>): boolean {
 }
 
 function candidateHasTargetPrice(candidate: Record<string, unknown>): boolean {
-  return extractTargetPrice({ targetPrice: candidate['targetPrice'], target: candidate['target'], startPrice: candidate['startPrice'], initialPrice: candidate['initialPrice'], gameStartPrice: candidate['gameStartPrice'], question: candidate['question'], title: candidate['title'], description: candidate['description'], rules: candidate['rules'], resolutionSource: candidate['resolutionSource'], groupItemTitle: candidate['groupItemTitle'], eventTitle: nestedStringField(candidate['event'], 'title'), eventDescription: nestedStringField(candidate['event'], 'description') }) !== null;
+  return extractTargetPrice({ targetPrice: candidate['targetPrice'], target: candidate['target'], startPrice: candidate['startPrice'], initialPrice: candidate['initialPrice'], gameStartPrice: candidate['gameStartPrice'], priceToBeat: candidate['priceToBeat'], eventMetadataPriceToBeat: findFirstNestedFieldValue(candidate['eventMetadata'], 'priceToBeat'), nestedEventMetadataPriceToBeat: findFirstNestedFieldValue(candidate['event'], 'priceToBeat') ?? findFirstNestedFieldValue(candidate['events'], 'priceToBeat') ?? findFirstNestedFieldValue(candidate, 'priceToBeat'), question: candidate['question'], title: candidate['title'], description: candidate['description'], rules: candidate['rules'], resolutionSource: candidate['resolutionSource'], groupItemTitle: candidate['groupItemTitle'], eventTitle: nestedStringField(candidate['event'], 'title'), eventDescription: nestedStringField(candidate['event'], 'description') }) !== null;
 }
 
 function hasStringField(record: Record<string, unknown>, fieldName: string): boolean {
@@ -723,6 +726,26 @@ function isNonTerminalMarketTemplate(rawMarket: Record<string, unknown>): boolea
   if (hasStringField(rawMarket, 'conditionId') || hasStringField(rawMarket, 'condition_id') || candidateHasOutcomes(rawMarket) || extractClobTokenIds(rawMarket).length > 0) return false;
   const text = buildSearchableMarketText(rawMarket);
   return /\b(?:btc|bitcoin)\s+up\s*(?:or\s*)?\/?down\s+(?:hourly|4h|daily)\b/u.test(text);
+}
+
+
+function findFirstNestedFieldValue(rawValue: unknown, fieldName: string, depth = 0): string | number | null {
+  if (depth > 6) return null;
+  if (Array.isArray(rawValue)) {
+    for (const entry of rawValue) {
+      const value = findFirstNestedFieldValue(entry, fieldName, depth + 1);
+      if (value !== null) return value;
+    }
+    return null;
+  }
+  if (!isRecord(rawValue)) return null;
+  const directValue = rawValue[fieldName];
+  if (typeof directValue === 'number' || typeof directValue === 'string') return directValue;
+  for (const value of Object.values(rawValue)) {
+    const nestedValue = findFirstNestedFieldValue(value, fieldName, depth + 1);
+    if (nestedValue !== null) return nestedValue;
+  }
+  return null;
 }
 
 function nestedStringField(value: unknown, fieldName: string): string | undefined {
@@ -746,7 +769,7 @@ function buildDebugQuery(source: GammaDiscoverySource, queryTerm: string, url: U
       marketSlug: typeof candidate['slug'] === 'string' ? candidate['slug'] : typeof candidate['marketSlug'] === 'string' ? candidate['marketSlug'] : null,
       question: typeof candidate['question'] === 'string' ? candidate['question'] : typeof candidate['title'] === 'string' ? candidate['title'] : null,
       detectedMarketDuration: detectMarketDuration(candidate),
-      endDate: timestampToIso(extractTime(candidate, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime'])),
+      endDate: timestampToIso(extractTime(candidate, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime'])),
       isWithinRequestedDateRange: candidate['__isWithinRequestedDateRange'] === true,
       hasOutcomes: candidateHasOutcomes(candidate),
       hasClobTokenIds: extractClobTokenIds(candidate).length > 0,
@@ -782,8 +805,23 @@ function extractCandidateMarketsInner(value: unknown, depth: number): Record<str
   if (Array.isArray(value)) return value.flatMap((item) => extractCandidateMarketsInner(item, depth + 1));
   if (!isRecord(value)) return [];
   const direct = looksLikeMarket(value) ? [value] : [];
-  const nested = ['markets', 'market', 'events', 'event', 'items', 'results', 'data', 'series'].flatMap((fieldName) => extractCandidateMarketsInner(value[fieldName], depth + 1));
+  const nested = ['markets', 'market', 'events', 'event', 'items', 'results', 'data', 'series'].flatMap((fieldName) => {
+    const nestedCandidates = extractCandidateMarketsInner(value[fieldName], depth + 1);
+    return fieldName === 'markets' ? nestedCandidates.map((candidate) => enrichNestedMarketWithParentContext(candidate, value)) : nestedCandidates;
+  });
   return [...direct, ...nested];
+}
+
+function enrichNestedMarketWithParentContext(nestedMarket: Record<string, unknown>, parent: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...nestedMarket,
+    eventMetadata: nestedMarket['eventMetadata'] ?? parent['eventMetadata'],
+    parentEventMetadata: parent['eventMetadata'],
+    eventTitle: parent['title'],
+    eventDescription: parent['description'],
+    eventStartTime: nestedMarket['eventStartTime'] ?? parent['startTime'] ?? parent['eventStartTime'],
+    eventEndTime: nestedMarket['eventEndTime'] ?? parent['endDate'] ?? parent['endTime'],
+  };
 }
 
 function looksLikeMarket(record: Record<string, unknown>): boolean {

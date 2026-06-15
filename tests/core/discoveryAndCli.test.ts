@@ -125,6 +125,101 @@ describe('Gamma discovery pagination and filters', () => {
     expect(result.rejectedMarkets.map((market) => market.rejectionReason)).toContain('outside_requested_date_range');
   });
 
+
+  it('accepts BTC Up/Down target price from nested eventMetadata priceToBeat', () => {
+    const rawMarket = {
+      question: 'Bitcoin Up or Down - April 30, 7PM ET',
+      slug: 'bitcoin-up-or-down-april-30-2026-7pm-et',
+      conditionId: '0x1h',
+      outcomes: '["Up", "Down"]',
+      clobTokenIds: '["up", "down"]',
+      eventStartTime: '2026-04-30T23:00:00Z',
+      endDate: '2026-05-01T00:00:00Z',
+      events: [{ eventMetadata: { finalPrice: 76346.57, priceToBeat: 76237.07 } }],
+    };
+    const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([]) as never, 'https://example.test');
+    expect(detectMarketDuration(rawMarket)).toBe('1h');
+    expect(adapter.parseMarkets([rawMarket], '/tmp/raw.json', '1h').acceptedMarkets[0]).toMatchObject({ marketSlug: rawMarket.slug, marketDuration: '1h', targetPrice: 76237.07 });
+    expect(adapter.parseMarkets([rawMarket], '/tmp/raw.json', 'all').acceptedMarkets[0]).toMatchObject({ marketSlug: rawMarket.slug, marketDuration: '1h', targetPrice: 76237.07 });
+  });
+
+  it('does not use eventMetadata finalPrice as target price', () => {
+    const rawMarket = {
+      question: 'Bitcoin Up or Down - April 30, 7PM ET',
+      slug: 'bitcoin-up-or-down-april-30-2026-7pm-et',
+      conditionId: '0xno-target',
+      outcomes: '["Up", "Down"]',
+      clobTokenIds: '["up", "down"]',
+      eventStartTime: '2026-04-30T23:00:00Z',
+      endDate: '2026-05-01T00:00:00Z',
+      events: [{ eventMetadata: { finalPrice: 76346.57 } }],
+    };
+    const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([]) as never, 'https://example.test');
+    const result = adapter.parseMarkets([rawMarket], '/tmp/raw.json', 'all');
+    expect(result.acceptedMarkets).toHaveLength(0);
+    expect(result.rejectedMarkets[0]).toMatchObject({ rejectionReason: 'target_price_missing', detectedMarketDuration: '1h' });
+  });
+
+  it('propagates parent eventMetadata to nested markets for 4h BTC Up/Down markets', async () => {
+    const parentEvent = {
+      title: 'Bitcoin Up or Down - June 14, 8:00AM-12:00PM ET',
+      slug: 'btc-updown-4h-1781438400',
+      eventMetadata: { priceToBeat: 105000.12, finalPrice: 104000.01 },
+      startTime: '2026-06-14T12:00:00Z',
+      endDate: '2026-06-14T16:00:00Z',
+      markets: [
+        {
+          question: 'Bitcoin Up or Down - June 14, 8:00AM-12:00PM ET',
+          slug: 'btc-updown-4h-1781438400',
+          conditionId: '0x4h',
+          outcomes: '["Up", "Down"]',
+          clobTokenIds: '["up", "down"]',
+        },
+      ],
+    };
+    const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([{ events: [parentEvent] }]) as never, 'https://example.test');
+    const markets = await adapter.discoverBitcoinUpDownMarkets('2026-06-14', '2026-06-15', { requestedMarketDuration: 'all', discoveryMaxTotalRequests: 1 });
+    const nestedMarket = markets.find((market) => market['conditionId'] === '0x4h');
+    expect(nestedMarket?.eventMetadata).toEqual(parentEvent.eventMetadata);
+    expect(nestedMarket?.parentEventMetadata).toEqual(parentEvent.eventMetadata);
+    const result = adapter.parseMarkets(markets, '/tmp/raw.json', 'all');
+    expect(result.acceptedMarkets[0]).toMatchObject({ marketSlug: 'btc-updown-4h-1781438400', marketDuration: '4h', targetPrice: 105000.12 });
+  });
+
+  it('prefers eventStartTime over startDate for market start and duration detection', () => {
+    const rawMarket = {
+      question: 'Bitcoin Up or Down - June 14, 8:00AM-12:00PM ET',
+      slug: 'btc-updown-4h-1781438400',
+      conditionId: '0x4h-start',
+      outcomes: '["Up", "Down"]',
+      clobTokenIds: '["up", "down"]',
+      targetPrice: 105000.12,
+      startDate: '2026-06-13T12:07:43Z',
+      eventStartTime: '2026-06-14T12:00:00Z',
+      endDate: '2026-06-14T16:00:00Z',
+    };
+    const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([]) as never, 'https://example.test');
+    const result = adapter.parseMarkets([rawMarket], '/tmp/raw.json', 'all');
+    expect(detectMarketDuration(rawMarket)).toBe('4h');
+    expect(result.acceptedMarkets[0]?.marketStartTimestampMilliseconds).toBe(Date.parse('2026-06-14T12:00:00Z'));
+  });
+
+  it('detects BTC Up/Down 5m markets as unsupported duration before target validation', () => {
+    const rawMarket = {
+      question: 'Bitcoin UpDown 5m - June 14, 8:00AM ET',
+      slug: 'btc-updown-5m-1781438400',
+      conditionId: '0x5m',
+      outcomes: '["Up", "Down"]',
+      clobTokenIds: '["up", "down"]',
+      eventStartTime: '2026-06-14T12:00:00Z',
+      endDate: '2026-06-14T12:05:00Z',
+    };
+    const adapter = new PolymarketGammaApiAdapter(new MockHttpClient([]) as never, 'https://example.test');
+    const result = adapter.parseMarkets([rawMarket], '/tmp/raw.json', 'all');
+    expect(detectMarketDuration(rawMarket)).toBe('5m');
+    expect(result.rejectedMarkets[0]).toMatchObject({ rejectionReason: 'unsupported_duration', detectedMarketDuration: '5m' });
+  });
+
   it('respects max pages per source/query', async () => {
     const httpClient = new MockHttpClient(Array.from({ length: 20 }, () => []));
     const adapter = new PolymarketGammaApiAdapter(httpClient as never, 'https://example.test');
