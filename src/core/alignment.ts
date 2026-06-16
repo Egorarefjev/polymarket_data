@@ -1,122 +1,29 @@
-import type { ExternalPricePoint, FuturePriceLabels, NormalizedMarket, NormalizedPricePoint, PriceHistoryPoint, PriceHistoryQualityMetrics, PrimaryPriceSourceName } from './domain.js';
-import { calculateDistanceToTarget, calculateSecondsLeft } from './calculations.js';
+import type { FuturePriceLabels, NormalizedMarket, NormalizedPricePoint, PriceHistoryPoint, PriceHistoryQualityMetrics } from './domain.js';
+import { calculateSecondsLeft } from './calculations.js';
 
-export interface BuildNormalizedPricePointsForMarketResult {
-  pricePoints: NormalizedPricePoint[];
-  skippedRowsMissingPrimaryPriceBeforeTimestamp: number;
-}
-
-export interface BuildNormalizedPricePointsForMarketParameters {
-  market: NormalizedMarket;
-  upPriceHistory: PriceHistoryPoint[];
-  downPriceHistory: PriceHistoryPoint[];
-  /** Must be sorted ascending by timestampMilliseconds when no lookup is provided. */
-  primaryExternalPricePoints: ExternalPricePoint[];
-  primaryPriceLookup?: CausalAsOfPriceLookup;
-  primaryPriceSourceName?: PrimaryPriceSourceName;
-  /** Must be sorted ascending by timestampMilliseconds when no lookup is provided. */
-  binanceSecondaryPricePoints?: ExternalPricePoint[];
-  binanceSecondaryPriceLookup?: CausalAsOfPriceLookup;
-  isBinanceSecondarySignalEnabled: boolean;
-  isProxyPrimaryPriceSourceForDebug?: boolean;
-  requestedFidelityMinutes: number;
-}
-
+export interface BuildNormalizedPricePointsForMarketResult { pricePoints: NormalizedPricePoint[]; skippedRowsMissingPolymarketPrice: number; skippedRowsInvalidPolymarketPrice: number; }
+export interface BuildNormalizedPricePointsForMarketParameters { market: NormalizedMarket; upPriceHistory: PriceHistoryPoint[]; downPriceHistory: PriceHistoryPoint[]; requestedFidelityMinutes: number; }
 const futureThresholds = [0.75, 0.8, 0.9, 0.95, 0.99] as const;
 
-export function buildNormalizedPricePointsForMarket(parameters: BuildNormalizedPricePointsForMarketParameters): NormalizedPricePoint[] {
-  return buildNormalizedPricePointsForMarketWithSkipCount(parameters).pricePoints;
-}
-
-export function buildNormalizedPricePointsForMarketWithSkipCount(parameters: BuildNormalizedPricePointsForMarketParameters): BuildNormalizedPricePointsForMarketResult {
-  const {
-    market,
-    upPriceHistory,
-    downPriceHistory,
-    primaryExternalPricePoints,
-    primaryPriceSourceName = parameters.isProxyPrimaryPriceSourceForDebug ? 'binance_proxy' : 'chainlink',
-    binanceSecondaryPricePoints = [],
-    isBinanceSecondarySignalEnabled,
-    isProxyPrimaryPriceSourceForDebug = false,
-    requestedFidelityMinutes,
-  } = parameters;
-  if (market.targetPrice === null) return { pricePoints: [], skippedRowsMissingPrimaryPriceBeforeTimestamp: 0 };
-
-  const upPriceByTimestamp = new Map(upPriceHistory.map((pricePoint) => [pricePoint.timestampMilliseconds, pricePoint.price]));
-  const downPriceByTimestamp = new Map(downPriceHistory.map((pricePoint) => [pricePoint.timestampMilliseconds, pricePoint.price]));
-  const allTimestamps = [...new Set([...upPriceByTimestamp.keys(), ...downPriceByTimestamp.keys()])].sort(
-    (leftTimestamp, rightTimestamp) => leftTimestamp - rightTimestamp,
-  );
-  const primaryPriceLookup = parameters.primaryPriceLookup ?? new CausalAsOfPriceLookup(primaryExternalPricePoints);
-  const binanceSecondaryPriceLookup = parameters.binanceSecondaryPriceLookup ?? new CausalAsOfPriceLookup(binanceSecondaryPricePoints);
-  const isOfficialChainlinkMode = primaryPriceSourceName === 'chainlink';
-  const baseQualityFlags = mergeUniqueFlags([
-    ...market.dataQualityFlags,
-    ...buildPriceHistoryQualityFlags('up', upPriceHistory, market, requestedFidelityMinutes),
-    ...buildPriceHistoryQualityFlags('down', downPriceHistory, market, requestedFidelityMinutes),
-    ...(isOfficialChainlinkMode && primaryExternalPricePoints.length === 0 ? ['chainlink_data_unavailable'] : []),
-    ...(isOfficialChainlinkMode && isExternalHistoryTooSparse(primaryExternalPricePoints, requestedFidelityMinutes) ? ['chainlink_history_too_sparse'] : []),
-    ...(isProxyPrimaryPriceSourceForDebug ? ['proxy_primary_price_source_not_official'] : []),
-  ]);
-
-  let skippedRowsMissingPrimaryPriceBeforeTimestamp = 0;
-  const pricePointsWithoutFutureLabels = allTimestamps.flatMap((timestampMilliseconds) => {
-    // Causal as-of join: for each Polymarket price timestamp, use only the latest
-    // primary price point at or before that timestamp. Never use future prices.
-    const primaryPricePoint = primaryPriceLookup.findLatestAtOrBefore(timestampMilliseconds);
-    if (primaryPricePoint === null) {
-      skippedRowsMissingPrimaryPriceBeforeTimestamp += 1;
-      return [];
-    }
-
-    const primaryDistanceToTarget = calculateDistanceToTarget(primaryPricePoint.price, market.targetPrice ?? 0);
+export function buildNormalizedPricePointsForMarket(parameters: BuildNormalizedPricePointsForMarketParameters): NormalizedPricePoint[] { return buildNormalizedPricePointsForMarketWithSkipCount(parameters).pricePoints; }
+export function buildNormalizedPricePointsForMarketWithSkipCount({ market, upPriceHistory, downPriceHistory, requestedFidelityMinutes }: BuildNormalizedPricePointsForMarketParameters): BuildNormalizedPricePointsForMarketResult {
+  const upPriceByTimestamp = new Map(upPriceHistory.map((p) => [p.timestampMilliseconds, p.price]));
+  const downPriceByTimestamp = new Map(downPriceHistory.map((p) => [p.timestampMilliseconds, p.price]));
+  const allTimestamps = [...new Set([...upPriceByTimestamp.keys(), ...downPriceByTimestamp.keys()])].sort((a, b) => a - b);
+  const baseQualityFlags = mergeUniqueFlags([...market.dataQualityFlags, ...buildPriceHistoryQualityFlags('up', upPriceHistory, market, requestedFidelityMinutes), ...buildPriceHistoryQualityFlags('down', downPriceHistory, market, requestedFidelityMinutes)]);
+  let skippedRowsMissingPolymarketPrice = 0;
+  let skippedRowsInvalidPolymarketPrice = 0;
+  const points = allTimestamps.flatMap((timestampMilliseconds) => {
+    const upPrice = upPriceByTimestamp.get(timestampMilliseconds) ?? null;
+    const downPrice = downPriceByTimestamp.get(timestampMilliseconds) ?? null;
+    if (upPrice === null && downPrice === null) { skippedRowsMissingPolymarketPrice += 1; return []; }
+    if (!isValidPrice(upPrice) || !isValidPrice(downPrice)) { skippedRowsInvalidPolymarketPrice += 1; return []; }
     const dataQualityFlags = [...baseQualityFlags];
-    if (!upPriceByTimestamp.has(timestampMilliseconds)) dataQualityFlags.push('price_history_missing_up');
-    if (!downPriceByTimestamp.has(timestampMilliseconds)) dataQualityFlags.push('price_history_missing_down');
-
-    const binancePricePoint = binanceSecondaryPriceLookup.findLatestAtOrBefore(timestampMilliseconds);
-    const binanceDistanceToTarget = binancePricePoint === null ? null : calculateDistanceToTarget(binancePricePoint.price, market.targetPrice ?? 0);
-    if (isBinanceSecondarySignalEnabled && binancePricePoint === null) dataQualityFlags.push('binance_secondary_signal_missing');
-    const chainlinkDistanceBasisPoints = isOfficialChainlinkMode ? primaryDistanceToTarget.distanceBasisPoints : null;
-    const binanceMinusChainlinkBasisPoints = binanceDistanceToTarget === null || chainlinkDistanceBasisPoints === null
-      ? null
-      : binanceDistanceToTarget.distanceBasisPoints - chainlinkDistanceBasisPoints;
-    if (binanceMinusChainlinkBasisPoints !== null && Math.abs(binanceMinusChainlinkBasisPoints) > 10) {
-      dataQualityFlags.push('binance_chainlink_divergence_high');
-    }
-
-    return [
-      {
-        marketSlug: market.marketSlug,
-        conditionId: market.conditionId,
-        marketDuration: market.marketDuration,
-        timestampMilliseconds,
-        secondsLeft: calculateSecondsLeft(market.marketEndTimestampMilliseconds, timestampMilliseconds),
-        targetPrice: market.targetPrice ?? 0,
-        upPrice: upPriceByTimestamp.get(timestampMilliseconds) ?? null,
-        downPrice: downPriceByTimestamp.get(timestampMilliseconds) ?? null,
-        primaryPriceSourceName,
-        primaryPrice: primaryPricePoint.price,
-        primaryTimestampMilliseconds: primaryPricePoint.timestampMilliseconds,
-        primaryDistanceUsd: primaryDistanceToTarget.distanceUsd,
-        primaryDistanceBasisPoints: primaryDistanceToTarget.distanceBasisPoints,
-        chainlinkPrice: isOfficialChainlinkMode ? primaryPricePoint.price : null,
-        chainlinkTimestampMilliseconds: isOfficialChainlinkMode ? primaryPricePoint.timestampMilliseconds : null,
-        chainlinkDistanceUsd: isOfficialChainlinkMode ? primaryDistanceToTarget.distanceUsd : null,
-        chainlinkDistanceBasisPoints,
-        binancePrice: binancePricePoint?.price ?? null,
-        binanceTimestampMilliseconds: binancePricePoint?.timestampMilliseconds ?? null,
-        binanceDistanceUsd: binanceDistanceToTarget?.distanceUsd ?? null,
-        binanceDistanceBasisPoints: binanceDistanceToTarget?.distanceBasisPoints ?? null,
-        binanceMinusChainlinkBasisPoints,
-        winner: market.winner,
-        isResolved: market.isResolved,
-        dataQualityFlags: mergeUniqueFlags(dataQualityFlags),
-      },
-    ];
+    if (upPrice === null) dataQualityFlags.push('price_history_missing_up');
+    if (downPrice === null) dataQualityFlags.push('price_history_missing_down');
+    return [{ marketSlug: market.marketSlug, conditionId: market.conditionId, marketDuration: market.marketDuration, timestampMilliseconds, timestampIso: new Date(timestampMilliseconds).toISOString(), secondsLeft: calculateSecondsLeft(market.marketEndTimestampMilliseconds, timestampMilliseconds), targetPrice: market.targetPrice, upPrice, downPrice, winner: market.winner, isResolved: market.isResolved, dataQualityFlags: mergeUniqueFlags(dataQualityFlags) }];
   });
-
-  return { pricePoints: addFutureLabels(pricePointsWithoutFutureLabels), skippedRowsMissingPrimaryPriceBeforeTimestamp };
+  return { pricePoints: addFutureLabels(points), skippedRowsMissingPolymarketPrice, skippedRowsInvalidPolymarketPrice };
 }
 
 export function addFutureLabels<T extends Omit<NormalizedPricePoint, keyof FuturePriceLabels>>(pricePoints: T[]): NormalizedPricePoint[] {
@@ -129,133 +36,16 @@ export function addFutureLabels<T extends Omit<NormalizedPricePoint, keyof Futur
       const suffix = thresholdSuffix(threshold);
       const upHit = futureSlice.find((point) => (point.upPrice ?? -Infinity) >= threshold) ?? null;
       const downHit = futureSlice.find((point) => (point.downPrice ?? -Infinity) >= threshold) ?? null;
-      return [
-        [`futureSecondsUntilUpPriceGreaterThanOrEqual${suffix}`, upHit === null ? null : Math.max(0, (upHit.timestampMilliseconds - pricePoint.timestampMilliseconds) / 1_000)],
-        [`futureSecondsUntilDownPriceGreaterThanOrEqual${suffix}`, downHit === null ? null : Math.max(0, (downHit.timestampMilliseconds - pricePoint.timestampMilliseconds) / 1_000)],
-        [`futureReachesUp${suffix}`, upHit !== null],
-        [`futureReachesDown${suffix}`, downHit !== null],
-      ];
+      return [[`futureSecondsUntilUpPriceGreaterThanOrEqual${suffix}`, upHit === null ? null : Math.max(0, (upHit.timestampMilliseconds - pricePoint.timestampMilliseconds) / 1_000)], [`futureSecondsUntilDownPriceGreaterThanOrEqual${suffix}`, downHit === null ? null : Math.max(0, (downHit.timestampMilliseconds - pricePoint.timestampMilliseconds) / 1_000)], [`futureReachesUp${suffix}`, upHit !== null], [`futureReachesDown${suffix}`, downHit !== null]];
     }));
-    return {
-      ...pricePoint,
-      futureMaximumUpPrice: futureUpPrices.length === 0 ? null : Math.max(...futureUpPrices),
-      futureMaximumDownPrice: futureDownPrices.length === 0 ? null : Math.max(...futureDownPrices),
-      futureMinimumUpPrice: futureUpPrices.length === 0 ? null : Math.min(...futureUpPrices),
-      futureMinimumDownPrice: futureDownPrices.length === 0 ? null : Math.min(...futureDownPrices),
-      futureFinalUpPrice: lastPresentPrice(futureSlice.map((point) => point.upPrice)),
-      futureFinalDownPrice: lastPresentPrice(futureSlice.map((point) => point.downPrice)),
-      ...labels,
-    } as NormalizedPricePoint;
+    return { ...pricePoint, futureMaximumUpPrice: futureUpPrices.length === 0 ? null : Math.max(...futureUpPrices), futureMaximumDownPrice: futureDownPrices.length === 0 ? null : Math.max(...futureDownPrices), futureMinimumUpPrice: futureUpPrices.length === 0 ? null : Math.min(...futureUpPrices), futureMinimumDownPrice: futureDownPrices.length === 0 ? null : Math.min(...futureDownPrices), futureFinalUpPrice: lastPresentPrice(futureSlice.map((point) => point.upPrice)), futureFinalDownPrice: lastPresentPrice(futureSlice.map((point) => point.downPrice)), ...labels } as NormalizedPricePoint;
   });
 }
-
-/**
- * Binary-search causal as-of lookup over an array sorted ascending by timestampMilliseconds.
- * The input array is retained by reference and never mutated.
- */
-export class CausalAsOfPriceLookup {
-  public constructor(private readonly sortedPricePoints: ExternalPricePoint[]) {}
-
-  public findLatestAtOrBefore(timestampMilliseconds: number): ExternalPricePoint | null {
-    let lowIndex = 0;
-    let highIndex = this.sortedPricePoints.length - 1;
-    let latestMatchingIndex = -1;
-
-    while (lowIndex <= highIndex) {
-      const middleIndex = lowIndex + Math.floor((highIndex - lowIndex) / 2);
-      const middleTimestampMilliseconds = this.sortedPricePoints[middleIndex]?.timestampMilliseconds ?? Number.POSITIVE_INFINITY;
-      if (middleTimestampMilliseconds <= timestampMilliseconds) {
-        latestMatchingIndex = middleIndex;
-        lowIndex = middleIndex + 1;
-      } else {
-        highIndex = middleIndex - 1;
-      }
-    }
-
-    return latestMatchingIndex === -1 ? null : this.sortedPricePoints[latestMatchingIndex] ?? null;
-  }
-}
-
-export function sortExternalPricePointsOnce(pricePoints: ExternalPricePoint[]): ExternalPricePoint[] {
-  return [...pricePoints].sort((leftPricePoint, rightPricePoint) => leftPricePoint.timestampMilliseconds - rightPricePoint.timestampMilliseconds);
-}
-
-/**
- * Causal as-of lookup. Input must be sorted ascending by timestampMilliseconds.
- * Uses binary search and never returns a point after timestampMilliseconds.
- */
-export function findLatestExternalPricePointAtOrBeforeTimestamp(pricePoints: ExternalPricePoint[], timestampMilliseconds: number): ExternalPricePoint | null {
-  return new CausalAsOfPriceLookup(pricePoints).findLatestAtOrBefore(timestampMilliseconds);
-}
-
-/** Input must be sorted ascending by timestampMilliseconds. */
-export function findLatestBinancePricePointAtOrBeforeTimestamp(pricePoints: ExternalPricePoint[], timestampMilliseconds: number): ExternalPricePoint | null {
-  return findLatestExternalPricePointAtOrBeforeTimestamp(pricePoints, timestampMilliseconds);
-}
-
-export function calculatePriceHistoryQualityMetrics(priceHistory: PriceHistoryPoint[]): PriceHistoryQualityMetrics {
-  if (priceHistory.length === 0) {
-    return { pointsCount: 0, minimumTimestampMilliseconds: null, maximumTimestampMilliseconds: null, medianGapMilliseconds: null, maximumGapMilliseconds: null };
-  }
-  const orderedHistory = [...priceHistory].sort((leftPoint, rightPoint) => leftPoint.timestampMilliseconds - rightPoint.timestampMilliseconds);
-  const gaps = orderedHistory.slice(1).map((pricePoint, index) => pricePoint.timestampMilliseconds - (orderedHistory[index]?.timestampMilliseconds ?? pricePoint.timestampMilliseconds));
-  return {
-    pointsCount: orderedHistory.length,
-    minimumTimestampMilliseconds: orderedHistory[0]?.timestampMilliseconds ?? null,
-    maximumTimestampMilliseconds: orderedHistory.at(-1)?.timestampMilliseconds ?? null,
-    medianGapMilliseconds: gaps.length === 0 ? null : median(gaps),
-    maximumGapMilliseconds: gaps.length === 0 ? null : Math.max(...gaps),
-  };
-}
-
-export function buildPriceHistoryQualityFlags(
-  outcome: 'up' | 'down',
-  priceHistory: PriceHistoryPoint[],
-  market: NormalizedMarket,
-  requestedFidelityMinutes: number,
-): string[] {
-  const metrics = calculatePriceHistoryQualityMetrics(priceHistory);
-  const flags: string[] = [];
-  if (metrics.pointsCount === 0) flags.push('price_history_empty', `price_history_missing_${outcome}`);
-  if (metrics.pointsCount < minimumExpectedPricePointsForDuration(market.marketDuration)) flags.push('price_history_too_few_points_for_duration');
-  if (metrics.medianGapMilliseconds !== null && metrics.medianGapMilliseconds > requestedFidelityMinutes * 60_000 * 2) flags.push('price_history_too_coarse');
-  if (metrics.minimumTimestampMilliseconds === null || metrics.minimumTimestampMilliseconds > market.marketStartTimestampMilliseconds + requestedFidelityMinutes * 60_000 * 2) {
-    flags.push('price_history_does_not_cover_market_start');
-  }
-  if (metrics.maximumTimestampMilliseconds === null || metrics.maximumTimestampMilliseconds < market.marketEndTimestampMilliseconds - requestedFidelityMinutes * 60_000 * 2) {
-    flags.push('price_history_does_not_cover_market_end');
-  }
-  return flags;
-}
-
-function isExternalHistoryTooSparse(pricePoints: ExternalPricePoint[], requestedFidelityMinutes: number): boolean {
-  if (pricePoints.length < 2) return pricePoints.length === 0;
-  const gaps = pricePoints.slice(1).map((pricePoint, index) => pricePoint.timestampMilliseconds - (pricePoints[index]?.timestampMilliseconds ?? pricePoint.timestampMilliseconds));
-  return median(gaps) > requestedFidelityMinutes * 60_000 * 2;
-}
-
-function median(values: number[]): number {
-  const orderedValues = [...values].sort((leftValue, rightValue) => leftValue - rightValue);
-  const middleIndex = Math.floor(orderedValues.length / 2);
-  return orderedValues.length % 2 === 0
-    ? ((orderedValues[middleIndex - 1] ?? 0) + (orderedValues[middleIndex] ?? 0)) / 2
-    : orderedValues[middleIndex] ?? 0;
-}
-
-function mergeUniqueFlags(flags: string[]): string[] {
-  return [...new Set(flags)];
-}
-
-function thresholdSuffix(threshold: number): string {
-  return Math.round(threshold * 100).toString().padStart(3, '0');
-}
-
-function lastPresentPrice(prices: Array<number | null>): number | null {
-  return [...prices].reverse().find((price): price is number => price !== null) ?? null;
-}
-
-function minimumExpectedPricePointsForDuration(marketDuration: NormalizedMarket['marketDuration']): number {
-  if (marketDuration === '1h') return 10;
-  if (marketDuration === '4h') return 30;
-  return 100;
-}
+export function calculatePriceHistoryQualityMetrics(priceHistory: PriceHistoryPoint[]): PriceHistoryQualityMetrics { if (priceHistory.length === 0) return { pointsCount: 0, minimumTimestampMilliseconds: null, maximumTimestampMilliseconds: null, medianGapMilliseconds: null, maximumGapMilliseconds: null }; const ordered = [...priceHistory].sort((a,b)=>a.timestampMilliseconds-b.timestampMilliseconds); const gaps = ordered.slice(1).map((p,i)=>p.timestampMilliseconds-(ordered[i]?.timestampMilliseconds ?? p.timestampMilliseconds)); return { pointsCount: ordered.length, minimumTimestampMilliseconds: ordered[0]?.timestampMilliseconds ?? null, maximumTimestampMilliseconds: ordered.at(-1)?.timestampMilliseconds ?? null, medianGapMilliseconds: gaps.length === 0 ? null : median(gaps), maximumGapMilliseconds: gaps.length === 0 ? null : Math.max(...gaps) }; }
+export function buildPriceHistoryQualityFlags(outcome: 'up' | 'down', priceHistory: PriceHistoryPoint[], market: NormalizedMarket, requestedFidelityMinutes: number): string[] { const metrics = calculatePriceHistoryQualityMetrics(priceHistory); const flags: string[] = []; if (metrics.pointsCount === 0) flags.push('price_history_empty', `price_history_missing_${outcome}`); if (metrics.pointsCount < minimumExpectedPricePointsForDuration(market.marketDuration)) flags.push('price_history_too_few_points_for_duration'); if (metrics.medianGapMilliseconds !== null && metrics.medianGapMilliseconds > requestedFidelityMinutes * 60_000 * 2) flags.push('price_history_too_coarse'); if (metrics.minimumTimestampMilliseconds === null || metrics.minimumTimestampMilliseconds > market.marketStartTimestampMilliseconds + requestedFidelityMinutes * 60_000 * 2) flags.push('price_history_does_not_cover_market_start'); if (metrics.maximumTimestampMilliseconds === null || metrics.maximumTimestampMilliseconds < market.marketEndTimestampMilliseconds - requestedFidelityMinutes * 60_000 * 2) flags.push('price_history_does_not_cover_market_end'); return flags; }
+function isValidPrice(price: number | null): boolean { return price === null || (Number.isFinite(price) && price >= 0 && price <= 1); }
+function median(values: number[]): number { const ordered = [...values].sort((a,b)=>a-b); const middle = Math.floor(ordered.length / 2); return ordered.length % 2 === 0 ? ((ordered[middle - 1] ?? 0) + (ordered[middle] ?? 0)) / 2 : ordered[middle] ?? 0; }
+function mergeUniqueFlags(flags: string[]): string[] { return [...new Set(flags)]; }
+function thresholdSuffix(threshold: number): string { return Math.round(threshold * 100).toString().padStart(3, '0'); }
+function lastPresentPrice(prices: Array<number | null>): number | null { return [...prices].reverse().find((price): price is number => price !== null) ?? null; }
+function minimumExpectedPricePointsForDuration(marketDuration: NormalizedMarket['marketDuration']): number { if (marketDuration === '1h') return 10; if (marketDuration === '4h') return 30; return 100; }

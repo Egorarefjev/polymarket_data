@@ -1,5 +1,3 @@
-import { BinanceArchiveApiAdapter } from '../adapters/binanceArchiveApi.js';
-import { ChainlinkLocalFilePriceSource } from '../adapters/externalPriceSource.js';
 import { FileStorage, ensureBaseDataDirectories } from '../adapters/fileStorage.js';
 import { PublicHttpClient } from '../adapters/httpClient.js';
 import { createCollectorLogger } from '../adapters/logger.js';
@@ -59,9 +57,7 @@ function createDefaultCollectorUseCases(options: CollectorOptions): CollectorUse
     new LocalParquetWriter(),
     new PolymarketGammaApiAdapter(httpClient),
     new PolymarketClobApiAdapter(httpClient),
-    new BinanceArchiveApiAdapter(httpClient),
     logger,
-    options.chainlinkInputFile === undefined ? undefined : new ChainlinkLocalFilePriceSource(options.chainlinkInputFile),
   );
 }
 

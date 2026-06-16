@@ -3,7 +3,6 @@ export function normalizeTimestampMilliseconds(timestampValue: number): number {
     throw new Error(`Invalid timestamp value: ${timestampValue}`);
   }
 
-  // Binance and exchange archives shifted some datasets from milliseconds to microseconds.
   // Normalize by magnitude instead of trusting one source-specific schema forever.
   if (timestampValue >= 10_000_000_000_000_000) {
     return Math.floor(timestampValue / 1_000);
