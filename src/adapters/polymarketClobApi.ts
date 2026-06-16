@@ -32,11 +32,7 @@ export class PolymarketClobApiAdapter {
     });
   }
 
-  public async tryDownloadPublicTrades(): Promise<{ available: false; dataQualityFlag: string }> {
-    // Public historical trades have moved across Polymarket surfaces over time. This collector
-    // intentionally refuses authenticated CLOB trade endpoints, so unavailable public access is a flag.
-    return { available: false, dataQualityFlag: 'trades_unavailable_without_public_endpoint' };
-  }
+
 }
 
 function extractRawHistoryArray(rawResponse: unknown): unknown[] {
