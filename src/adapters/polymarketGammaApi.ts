@@ -88,9 +88,9 @@ const EMPTY_REJECTED_BY_REASON: Record<string, number> = {
 
 
 const DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 60;
-const DEFAULT_DISCOVERY_MAX_PAGES_PER_QUERY = 2;
-const DEFAULT_DISCOVERY_MAX_TOTAL_REQUESTS = 50;
-const DEFAULT_DISCOVERY_MAX_CANDIDATES = 500;
+const DEFAULT_DISCOVERY_MAX_PAGES_PER_QUERY = 6;
+const DEFAULT_DISCOVERY_MAX_TOTAL_REQUESTS = 300;
+const DEFAULT_DISCOVERY_MAX_CANDIDATES = 2_000;
 const DEFAULT_DISCOVERY_REQUEST_TIMEOUT_SECONDS = 10;
 
 const PRIORITIZED_DURATION_SEARCH_TERMS: Record<MarketDuration, readonly string[]> = {
@@ -109,6 +109,27 @@ export function durationSpecificBitcoinUpDownSearchTerms(requestedDuration: Requ
   const durations = requestedDuration === 'all' ? SUPPORTED_MARKET_DURATIONS : [requestedDuration];
   const termSource = expandedSearch ? DURATION_SEARCH_TERMS : PRIORITIZED_DURATION_SEARCH_TERMS;
   return [...new Set(durations.flatMap((duration) => termSource[duration]))];
+}
+
+export function buildDateBasedBitcoinUpDownSearchTerms(startDate: string, endDate: string, requestedDuration: RequestedMarketDuration): string[] {
+  const terms = new Set<string>();
+  const formatter = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'long', day: 'numeric', hour: 'numeric', hour12: true });
+  const dayFormatter = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'long', day: 'numeric' });
+  const start = Date.parse(`${startDate}T00:00:00.000Z`);
+  const end = Date.parse(`${endDate}T00:00:00.000Z`);
+  for (let timestamp = start; timestamp <= end; timestamp += 60 * 60_000) {
+    const parts = Object.fromEntries(formatter.formatToParts(new Date(timestamp)).map((part) => [part.type, part.value]));
+    const monthDay = `${parts['month']} ${parts['day']}`;
+    const hour = `${parts['hour']}${String(parts['dayPeriod']).toUpperCase()} ET`;
+    if (requestedDuration === 'all' || requestedDuration === '1h') terms.add(`Bitcoin Up or Down - ${monthDay}, ${hour}`);
+    if ((requestedDuration === 'all' || requestedDuration === '4h') && timestamp % (4 * 60 * 60_000) === 0) {
+      const endParts = Object.fromEntries(formatter.formatToParts(new Date(timestamp + 4 * 60 * 60_000)).map((part) => [part.type, part.value]));
+      const endHour = `${endParts['hour']}${String(endParts['dayPeriod']).toUpperCase()} ET`;
+      terms.add(`Bitcoin Up or Down - ${monthDay}, ${hour.replace(' ET', '')}-${endHour}`);
+    }
+    if (requestedDuration === 'all' || requestedDuration === '1d') terms.add(`Bitcoin Up or Down - ${dayFormatter.format(new Date(timestamp))}`);
+  }
+  return [...terms];
 }
 
 function normalizeDiscoveryOptions(options: GammaDiscoveryOptions): Required<Pick<GammaDiscoveryOptions, 'discoveryTimeoutSeconds' | 'discoveryMaxPagesPerQuery' | 'discoveryMaxTotalRequests' | 'discoveryMaxCandidates' | 'discoveryRequestTimeoutSeconds' | 'discoveryExpandedSearch'>> {
@@ -227,8 +248,8 @@ export class PolymarketGammaApiAdapter {
       else return false;
       return true;
     };
-    for (const searchTerm of durationSpecificBitcoinUpDownSearchTerms(requestedMarketDuration, expandedSearch)) {
-      const sources: readonly GammaDiscoverySource[] = requestedMarketDuration === 'all' && !expandedSearch ? ['public-search', 'markets'] : ['public-search', 'events', 'series', 'markets'];
+    for (const searchTerm of [...durationSpecificBitcoinUpDownSearchTerms(requestedMarketDuration, expandedSearch), ...buildDateBasedBitcoinUpDownSearchTerms(startDate, endDate, requestedMarketDuration)]) {
+      const sources: readonly GammaDiscoverySource[] = ['public-search', 'events', 'series', 'markets'];
       for (const source of sources) {
         for (const url of this.discoveryUrls(source, searchTerm, startDate, endDate, limits.discoveryMaxPagesPerQuery)) {
           if (stopIfNeeded()) break;
@@ -677,6 +698,8 @@ function deduplicationKey(rawMarket: Record<string, unknown>): string {
   if (conditionId !== null && conditionId.length > 0) return `condition:${conditionId}`;
   const slug = typeof rawMarket['slug'] === 'string' ? rawMarket['slug'] : typeof rawMarket['marketSlug'] === 'string' ? rawMarket['marketSlug'] : null;
   if (slug !== null && slug.length > 0) return `slug:${slug}`;
+  const tokenIds = extractClobTokenIds(rawMarket);
+  if (tokenIds.length > 0) return `tokens:${tokenIds.join('|')}`;
   return `question:${String(rawMarket['question'] ?? rawMarket['title'] ?? JSON.stringify(rawMarket))}`;
 }
 
@@ -714,7 +737,7 @@ function candidateHasOutcomes(candidate: Record<string, unknown>): boolean {
   try { return parseOutcomes(candidate['outcomes'] ?? candidate['shortOutcomes'] ?? []).length > 0; } catch { return false; }
 }
 
-function candidateHasTargetPrice(candidate: Record<string, unknown>): boolean {
+export function candidateHasTargetPrice(candidate: Record<string, unknown>): boolean {
   return extractTargetPrice({ targetPrice: candidate['targetPrice'], target: candidate['target'], startPrice: candidate['startPrice'], initialPrice: candidate['initialPrice'], gameStartPrice: candidate['gameStartPrice'], priceToBeat: candidate['priceToBeat'], eventMetadataPriceToBeat: findFirstNestedFieldValue(candidate['eventMetadata'], 'priceToBeat'), nestedEventMetadataPriceToBeat: findFirstNestedFieldValue(candidate['event'], 'priceToBeat') ?? findFirstNestedFieldValue(candidate['events'], 'priceToBeat') ?? findFirstNestedFieldValue(candidate, 'priceToBeat'), question: candidate['question'], title: candidate['title'], description: candidate['description'], rules: candidate['rules'], resolutionSource: candidate['resolutionSource'], groupItemTitle: candidate['groupItemTitle'], eventTitle: nestedStringField(candidate['event'], 'title'), eventDescription: nestedStringField(candidate['event'], 'description') }) !== null;
 }
 
@@ -874,7 +897,7 @@ function extractKeysetMarkets(rawPage: Record<string, unknown>): Record<string, 
   return Array.isArray(rawMarkets) ? rawMarkets.filter(isRecord) : null;
 }
 
-function extractClobTokenIds(rawMarket: Record<string, unknown>): string[] {
+export function extractClobTokenIds(rawMarket: Record<string, unknown>): string[] {
   const rawTokenIds = rawMarket['clobTokenIds'] ?? rawMarket['clobTokenIDs'] ?? rawMarket['tokenIds'];
   if (typeof rawTokenIds === 'string') {
     try {
@@ -898,11 +921,11 @@ function isExplicitOutcome(outcome: string, desiredOutcome: 'up' | 'down'): bool
   return normalizedOutcome === desiredOutcome || normalizedOutcome === `bitcoin ${desiredOutcome}` || normalizedOutcome === `btc ${desiredOutcome}`;
 }
 
-function extractTime(rawMarket: Record<string, unknown>, fieldNames: string[]): number | null {
+export function extractTime(rawMarket: Record<string, unknown>, fieldNames: string[]): number | null {
   return extractTimeFromValue(rawMarket, fieldNames, 0);
 }
 
-function extractTimeFromValue(value: unknown, fieldNames: string[], depth: number): number | null {
+export function extractTimeFromValue(value: unknown, fieldNames: string[], depth: number): number | null {
   if (depth > 2 || !isRecord(value)) return null;
   for (const fieldName of fieldNames) {
     const timestamp = parseTimestampValue(value[fieldName]);

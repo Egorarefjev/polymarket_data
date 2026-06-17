@@ -2,7 +2,8 @@ import pLimit from 'p-limit';
 import type { FileStorage } from '../adapters/fileStorage.js';
 import type { LocalParquetWriter } from '../adapters/parquetWriter.js';
 import { serializeDataQualityFlags } from '../adapters/parquetWriter.js';
-import { isBitcoinUpDownMarket, type GammaDiscoveryOptions, type PolymarketGammaApiAdapter } from '../adapters/polymarketGammaApi.js';
+import { determineMarketWinner, parseOutcomePrices, parseOutcomes } from '../core/parsing.js';
+import { candidateHasTargetPrice, detectMarketDuration, extractClobTokenIds, extractTime, isBitcoinUpDownMarket, type GammaDiscoveryOptions, type PolymarketGammaApiAdapter } from '../adapters/polymarketGammaApi.js';
 import type { PolymarketClobApiAdapter } from '../adapters/polymarketClobApi.js';
 import type { CollectorLogger } from '../adapters/logger.js';
 import type { NormalizedMarket, NormalizedPricePoint, PriceHistoryPoint, RejectedMarket, RequestedMarketDuration, StrategyTrainingRow } from '../core/domain.js';
@@ -69,6 +70,7 @@ export class CollectorUseCases {
     await this.writeRejectedMarketsParquet(options, discoveryResult.rejectedMarkets);
     const discoveryDebug = this.gammaApiAdapter.attachParseResultsToLastDiscoveryDebug(discoveryResult);
     if (discoveryDebug !== null) await this.fileStorage.writeJson(discoveryDebugRelativeFilePath(options), discoveryDebug, true);
+    if (discoveryDebug !== null) await this.fileStorage.writeJson(discoveryAuditRelativeFilePath(options), buildDiscoveryAudit(options, rawMarkets, discoveryResult, discoveryDebug), true);
 
     this.logger.info(
       {
@@ -189,7 +191,8 @@ export class CollectorUseCases {
     const debug = this.gammaApiAdapter.getLastDiscoveryDebug();
     if (debug !== null) {
       for (const query of debug.queries) this.logger.info(query, 'Discovery query/source result');
-      this.logger.info({ discoveryDebugFilePath: this.fileStorage.resolve(discoveryDebugRelativeFilePath(options)), ...debug }, 'Discovery diagnosis completed');
+      const audit = await this.fileStorage.readJson<Record<string, unknown>>(discoveryAuditRelativeFilePath(options));
+      this.logger.info({ discoveryDebugFilePath: this.fileStorage.resolve(discoveryDebugRelativeFilePath(options)), discoveryAuditFilePath: this.fileStorage.resolve(discoveryAuditRelativeFilePath(options)), acceptedMarkets: audit['acceptedMarkets'], acceptedByDuration: audit['acceptedByDuration'], candidatesInsideRequestedDateRange: audit['candidatesInsideRequestedDateRange'], insideDateRangeByDuration: audit['insideDateRangeByDuration'], rejectedByReason: audit['rejectedByReason'], missingHourlyWindowsCount: Array.isArray(audit['missingHourlyWindows']) ? audit['missingHourlyWindows'].length : 0 }, 'Discovery diagnosis completed');
     }
   }
 
@@ -271,6 +274,7 @@ export function collectorStateKey(options: Pick<CollectorOptions, 'startDate' | 
 export function marketDurationStateKey(options: Pick<CollectorOptions, 'marketDuration'>): string { return options.marketDuration; }
 export function rawGammaRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `raw/gamma/btc-up-down_candidates_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.json`; }
 export function discoveryDebugRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `raw/gamma/discovery_debug_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.json`; }
+export function discoveryAuditRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `processed/discovery_audit_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.json`; }
 export function acceptedMarketsRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `processed/accepted_markets_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.jsonl`; }
 export function rejectedMarketsRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>): string { return `rejected/rejected_markets_${marketDurationStateKey(options)}_${dateRangeStateKey(options)}.jsonl`; }
 export function rawPriceHistoryRelativeFilePath(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'priceFidelityMinutes' | 'marketDuration'>, marketSlug: string, outcome: 'up' | 'down'): string { return `raw/polymarket-prices/${marketDurationStateKey(options)}_${dateRangeStateKey(options)}_${marketSlug}_${outcome}_${options.priceFidelityMinutes}m.json`; }
@@ -336,3 +340,43 @@ function countRejectedByReason(markets: RejectedMarket[]): Record<string, number
 }
 
 function toRejectedMarketParquetRow(rejectedMarket: RejectedMarket): Record<string, unknown> { return { market_slug: rejectedMarket.marketSlug, condition_id: rejectedMarket.conditionId, question: rejectedMarket.question, detected_market_duration: rejectedMarket.detectedMarketDuration ?? null, rejection_reason: rejectedMarket.rejectionReason, raw_market_file_path: rejectedMarket.rawMarketFilePath, data_quality_flags: serializeDataQualityFlags(rejectedMarket.dataQualityFlags) }; }
+
+export function buildExpectedHourlyWindows(startDate: string, endDate: string): string[] {
+  const windows: string[] = [];
+  for (let timestamp = Date.parse(`${startDate}T00:00:00.000Z`) + 60 * 60_000; timestamp <= Date.parse(`${endDate}T00:00:00.000Z`); timestamp += 60 * 60_000) windows.push(new Date(timestamp).toISOString());
+  return windows;
+}
+
+export function buildDiscoveryAudit(options: Pick<CollectorOptions, 'startDate' | 'endDate' | 'marketDuration'>, rawMarkets: Record<string, unknown>[], discoveryResult: { acceptedMarkets: NormalizedMarket[]; rejectedMarkets: RejectedMarket[] }, debug?: { candidateMarketsFetched: number; deduplicatedCandidateMarkets: number; rejectedByReason: Record<string, number>; acceptedByDuration: Record<string, number> }): Record<string, unknown> {
+  const auditDebug = debug ?? { candidateMarketsFetched: rawMarkets.length, deduplicatedCandidateMarkets: rawMarkets.length, rejectedByReason: countRejectedByReason(discoveryResult.rejectedMarkets), acceptedByDuration: countAcceptedByDuration(discoveryResult.acceptedMarkets) };
+  const rejectedByKey = new Map(discoveryResult.rejectedMarkets.map((market) => [auditKey(market.conditionId, market.marketSlug, null), market]));
+  const acceptedByKey = new Map(discoveryResult.acceptedMarkets.map((market) => [auditKey(market.conditionId, market.marketSlug, [market.upTokenId, market.downTokenId].filter((value): value is string => value !== null)), market]));
+  const insideMarkets = rawMarkets.filter((market) => rawMarketInsideRequestedRange(market, options.startDate, options.endDate));
+  const foundByDuration = countRawByDuration(rawMarkets);
+  const insideDateRangeByDuration = countRawByDuration(insideMarkets);
+  const unsupportedInsideDateRangeByDuration: Record<string, number> = { '5m': insideDateRangeByDuration['5m'] ?? 0, '15m': insideDateRangeByDuration['15m'] ?? 0, unknown: insideDateRangeByDuration['unknown'] ?? 0 };
+  const insideDateRangeMarkets = insideMarkets.map((market) => {
+    const key = auditKey(typeof market['conditionId'] === 'string' ? market['conditionId'] : typeof market['condition_id'] === 'string' ? market['condition_id'] : null, typeof market['slug'] === 'string' ? market['slug'] : typeof market['marketSlug'] === 'string' ? market['marketSlug'] : null, extractClobTokenIds(market));
+    const accepted = acceptedByKey.get(key);
+    const rejected = rejectedByKey.get(key) ?? rejectedByKey.get(auditKey(typeof market['conditionId'] === 'string' ? market['conditionId'] : typeof market['condition_id'] === 'string' ? market['condition_id'] : null, typeof market['slug'] === 'string' ? market['slug'] : typeof market['marketSlug'] === 'string' ? market['marketSlug'] : null, null));
+    const outcomes = safeOutcomes(market);
+    const prices = parseOutcomePrices(market['outcomePrices'] ?? []);
+    return { marketSlug: market['slug'] ?? market['marketSlug'] ?? null, question: market['question'] ?? market['title'] ?? null, detectedMarketDuration: detectMarketDuration(market), endDate: timestampIso(extractTime(market, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime'])), eventStartTime: timestampIso(extractTime(market, ['eventStartTime'])), startTime: timestampIso(extractTime(market, ['startTime', 'gameStartTime'])), startDate: timestampIso(extractTime(market, ['startDate', 'startDateIso'])), rejectionReason: rejected?.rejectionReason ?? (accepted === undefined ? null : null), hasTargetPrice: candidateHasTargetPrice(market), hasClobTokenIds: extractClobTokenIds(market).length > 0, winner: determineMarketWinner(market, outcomes, prices), isClosed: typeof market['closed'] === 'boolean' ? market['closed'] : null, rawOutcomePrices: market['outcomePrices'] ?? [] };
+  });
+  const acceptedHourlyEnds = new Set(discoveryResult.acceptedMarkets.filter((market) => market.marketDuration === '1h').map((market) => new Date(market.marketEndTimestampMilliseconds).toISOString()));
+  const missingHourlyWindows = options.marketDuration === 'all' || options.marketDuration === '1h' ? buildExpectedHourlyWindows(options.startDate, options.endDate).filter((endIso) => !acceptedHourlyEnds.has(endIso)) : [];
+  const outsideDateRangeSample = discoveryResult.rejectedMarkets.filter((market) => market.rejectionReason === 'outside_requested_date_range').slice(0, 20).map((market) => {
+    const rawMarket = rawMarkets.find((raw) => (raw['slug'] ?? raw['marketSlug']) === market.marketSlug || raw['conditionId'] === market.conditionId || raw['condition_id'] === market.conditionId) ?? {};
+    return { marketSlug: market.marketSlug, question: market.question, detectedMarketDuration: market.detectedMarketDuration, endDate: timestampIso(extractTime(rawMarket, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime'])) };
+  });
+  return { startDate: options.startDate, endDate: options.endDate, requestedMarketDuration: options.marketDuration, rawCandidates: auditDebug.candidateMarketsFetched, deduplicatedCandidates: auditDebug.deduplicatedCandidateMarkets, candidatesInsideRequestedDateRange: insideMarkets.length, acceptedMarkets: discoveryResult.acceptedMarkets.length, rejectedMarkets: discoveryResult.rejectedMarkets.length, acceptedByDuration: auditDebug.acceptedByDuration, rejectedByReason: auditDebug.rejectedByReason, foundByDuration, insideDateRangeByDuration, unsupportedInsideDateRangeByDuration, insideDateRangeMarkets, outsideDateRangeSample, missingHourlyWindows };
+}
+
+function rawMarketInsideRequestedRange(market: Record<string, unknown>, startDate: string, endDate: string): boolean {
+  const end = extractTime(market, ['endDate', 'endDateIso', 'closedTime', 'gameEndTime', 'eventEndTime', 'endTime']);
+  return end !== null && end >= Date.parse(`${startDate}T00:00:00.000Z`) && end < Date.parse(`${endDate}T00:00:00.000Z`);
+}
+function countRawByDuration(markets: Record<string, unknown>[]): Record<string, number> { const counts: Record<string, number> = { '1h': 0, '4h': 0, '1d': 0, '15m': 0, '5m': 0, unknown: 0 }; for (const market of markets) { const duration = detectMarketDuration(market) ?? 'unknown'; counts[duration] = (counts[duration] ?? 0) + 1; } return counts; }
+function auditKey(conditionId: string | null, slug: string | null, tokenIds: string[] | null): string { if (conditionId) return `condition:${conditionId}`; if (slug) return `slug:${slug}`; if (tokenIds !== null && tokenIds.length > 0) return `tokens:${tokenIds.join('|')}`; return 'unknown'; }
+function timestampIso(timestamp: number | null): string | null { return timestamp === null ? null : new Date(timestamp).toISOString(); }
+function safeOutcomes(market: Record<string, unknown>): string[] { try { return parseOutcomes(market['outcomes'] ?? market['shortOutcomes'] ?? []); } catch { return []; } }
