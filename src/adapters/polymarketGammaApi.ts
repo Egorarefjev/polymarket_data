@@ -132,16 +132,18 @@ export function buildExactBitcoinUpDownTitleSearchTerms(startDate: string, endDa
     for (let endTimestamp = start; endTimestamp < end; endTimestamp += 4 * 60 * 60_000) {
       const startEt = formatEtMarketTime(endTimestamp - 4 * 60 * 60_000);
       const endEt = formatEtMarketTime(endTimestamp);
+      terms.add(`Bitcoin Up or Down - ${startEt.monthDay}, ${startEt.hourWithMinutes}-${endEt.hourWithMinutes} ET`);
       terms.add(`Bitcoin Up or Down - ${startEt.monthDay}, ${startEt.hour}-${endEt.hour} ET`);
     }
   }
   return [...terms];
 }
 
-function formatEtMarketTime(timestampMilliseconds: number): { monthDay: string; hour: string } {
+function formatEtMarketTime(timestampMilliseconds: number): { monthDay: string; hour: string; hourWithMinutes: string } {
   const formatter = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'long', day: 'numeric', hour: 'numeric', hour12: true });
   const parts = Object.fromEntries(formatter.formatToParts(new Date(timestampMilliseconds)).map((part) => [part.type, part.value]));
-  return { monthDay: `${parts['month']} ${parts['day']}`, hour: `${parts['hour']}${String(parts['dayPeriod']).toUpperCase()}` };
+  const hour = `${parts['hour']}${String(parts['dayPeriod']).toUpperCase()}`;
+  return { monthDay: `${parts['month']} ${parts['day']}`, hour, hourWithMinutes: `${parts['hour']}:00${String(parts['dayPeriod']).toUpperCase()}` };
 }
 
 function normalizeDiscoveryOptions(options: GammaDiscoveryOptions): Required<Pick<GammaDiscoveryOptions, 'discoveryTimeoutSeconds' | 'discoveryMaxPagesPerQuery' | 'discoveryMaxTotalRequests' | 'discoveryMaxCandidates' | 'discoveryRequestTimeoutSeconds' | 'discoveryExpandedSearch'>> {

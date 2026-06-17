@@ -27,8 +27,9 @@ describe('discovery completeness audit', () => {
 
   it('date range 2026-05-02 UTC generates relevant ET 4h search windows', () => {
     const terms = buildExactBitcoinUpDownTitleSearchTerms('2026-05-02', '2026-05-03', 'all');
+    expect(terms).toContain('Bitcoin Up or Down - May 1, 4:00PM-8:00PM ET');
+    expect(terms).toContain('Bitcoin Up or Down - May 2, 12:00AM-4:00AM ET');
     expect(terms).toContain('Bitcoin Up or Down - May 1, 8PM-12AM ET');
-    expect(terms).toContain('Bitcoin Up or Down - May 2, 12AM-4AM ET');
   });
 
   it('searches exact title terms before generic terms', async () => {
@@ -41,7 +42,7 @@ describe('discovery completeness audit', () => {
     });
     await adapter.discoverBitcoinUpDownMarkets('2026-05-02', '2026-05-03', { requestedMarketDuration: 'all', discoveryMaxTotalRequests: 200, discoveryMaxPagesPerQuery: 1 });
     expect(requestedQueries[0]).toBe('Bitcoin Up or Down - May 1, 8PM ET');
-    expect(requestedQueries.indexOf('btc updown 1h')).toBeGreaterThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 4PM-8PM ET'));
+    expect(requestedQueries.indexOf('btc updown 1h')).toBeGreaterThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 4:00PM-8:00PM ET'));
   });
 
   it('accepted 1h market with endDate inside range is counted and audit contains inside summaries', () => {
@@ -61,6 +62,7 @@ describe('discovery completeness audit', () => {
     const audit = buildDiscoveryAudit({ startDate: '2026-05-02', endDate: '2026-05-03', marketDuration: 'all' }, [outside], result);
     expect(audit.candidatesInsideRequestedDateRange).toBe(0);
     expect((audit.missingHourlyWindows as unknown[])).toEqual(buildExpectedHourlyWindows('2026-05-02', '2026-05-03'));
+    expect(audit.missingHourlyWindows as unknown[]).not.toContain('2026-05-03T00:00:00.000Z');
   });
 
   it('duplicate market from multiple queries is deduped by conditionId', async () => {

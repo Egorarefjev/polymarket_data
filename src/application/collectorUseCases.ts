@@ -343,7 +343,7 @@ function toRejectedMarketParquetRow(rejectedMarket: RejectedMarket): Record<stri
 
 export function buildExpectedHourlyWindows(startDate: string, endDate: string): string[] {
   const windows: string[] = [];
-  for (let timestamp = Date.parse(`${startDate}T00:00:00.000Z`) + 60 * 60_000; timestamp <= Date.parse(`${endDate}T00:00:00.000Z`); timestamp += 60 * 60_000) windows.push(new Date(timestamp).toISOString());
+  for (let timestamp = Date.parse(`${startDate}T00:00:00.000Z`); timestamp < Date.parse(`${endDate}T00:00:00.000Z`); timestamp += 60 * 60_000) windows.push(new Date(timestamp).toISOString());
   return windows;
 }
 
