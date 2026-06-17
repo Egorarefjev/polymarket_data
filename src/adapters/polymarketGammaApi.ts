@@ -53,6 +53,7 @@ export interface GammaDiscoveryDebug {
   targetPriceMissingAfterHydration: number;
   stopReason: GammaDiscoveryStopReason;
   searchedExactTitleTermsCount: number;
+  searchedExactTitleTermsByDuration: Record<MarketDuration, number>;
   searchedGenericTermsCount: number;
   queries: GammaDiscoveryDebugQuery[];
 }
@@ -118,25 +119,40 @@ export function buildDateBasedBitcoinUpDownSearchTerms(startDate: string, endDat
 }
 
 export function buildExactBitcoinUpDownTitleSearchTerms(startDate: string, endDate: string, requestedDuration: RequestedMarketDuration): string[] {
-  const terms = new Set<string>();
+  return buildExactBitcoinUpDownTitleSearchTermGroups(startDate, endDate, requestedDuration).flatMap((group) => group.terms);
+}
+
+function buildExactBitcoinUpDownTitleSearchTermGroups(startDate: string, endDate: string, requestedDuration: RequestedMarketDuration): { duration: MarketDuration; terms: string[] }[] {
   const start = Date.parse(`${startDate}T00:00:00.000Z`);
   const end = Date.parse(`${endDate}T00:00:00.000Z`);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
+  const groups: Record<MarketDuration, Set<string>> = { '1h': new Set<string>(), '4h': new Set<string>(), '1d': new Set<string>() };
   if (requestedDuration === 'all' || requestedDuration === '1h') {
     for (let endTimestamp = start; endTimestamp < end; endTimestamp += 60 * 60_000) {
       const endEt = formatEtMarketTime(endTimestamp);
-      terms.add(`Bitcoin Up or Down - ${endEt.monthDay}, ${endEt.hour} ET`);
+      groups['1h'].add(`Bitcoin Up or Down - ${endEt.monthDay}, ${endEt.hour} ET`);
     }
   }
   if (requestedDuration === 'all' || requestedDuration === '4h') {
     for (let endTimestamp = start; endTimestamp < end; endTimestamp += 4 * 60 * 60_000) {
       const startEt = formatEtMarketTime(endTimestamp - 4 * 60 * 60_000);
       const endEt = formatEtMarketTime(endTimestamp);
-      terms.add(`Bitcoin Up or Down - ${startEt.monthDay}, ${startEt.hourWithMinutes}-${endEt.hourWithMinutes} ET`);
-      terms.add(`Bitcoin Up or Down - ${startEt.monthDay}, ${startEt.hour}-${endEt.hour} ET`);
+      groups['4h'].add(`Bitcoin Up or Down - ${startEt.monthDay}, ${startEt.hourWithMinutes}-${endEt.hourWithMinutes} ET`);
+      groups['4h'].add(`Bitcoin Up or Down - ${startEt.monthDay}, ${startEt.hour}-${endEt.hour} ET`);
     }
   }
-  return [...terms];
+  const durationOrder: MarketDuration[] = requestedDuration === 'all' ? ['4h', '1h', '1d'] : [requestedDuration];
+  return durationOrder.map((duration) => ({ duration, terms: [...groups[duration]] })).filter((group) => group.terms.length > 0);
+}
+
+
+function countSearchedExactTitleTermsByDuration(queries: GammaDiscoveryDebugQuery[], exactTitleTermsByDuration: Map<string, MarketDuration>): Record<MarketDuration, number> {
+  const searchedTermsByDuration: Record<MarketDuration, Set<string>> = { '1h': new Set<string>(), '4h': new Set<string>(), '1d': new Set<string>() };
+  for (const query of queries) {
+    const duration = exactTitleTermsByDuration.get(query.queryTerm);
+    if (duration !== undefined) searchedTermsByDuration[duration].add(query.queryTerm);
+  }
+  return { '1h': searchedTermsByDuration['1h'].size, '4h': searchedTermsByDuration['4h'].size, '1d': searchedTermsByDuration['1d'].size };
 }
 
 function formatEtMarketTime(timestampMilliseconds: number): { monthDay: string; hour: string; hourWithMinutes: string } {
@@ -177,11 +193,13 @@ export class PolymarketGammaApiAdapter {
   public attachParseResultsToLastDiscoveryDebug(discoveryResult: GammaDiscoveryResult): GammaDiscoveryDebug | null {
     if (this.lastDiscoveryDebug === null) return null;
     const acceptedByKey = new Map(discoveryResult.acceptedMarkets.map((market) => [normalizedDeduplicationKey(market.conditionId, market.marketSlug, market.question), market]));
-    const rejectedByKey = new Map(discoveryResult.rejectedMarkets.map((market) => [normalizedDeduplicationKey(market.conditionId, market.marketSlug, market.question), market]));
+    const acceptedSlugs = new Set(discoveryResult.acceptedMarkets.map((market) => market.marketSlug));
+    const auditRejectedMarkets = discoveryResult.rejectedMarkets.filter((market) => market.marketSlug === null || !acceptedSlugs.has(market.marketSlug));
+    const rejectedByKey = new Map(auditRejectedMarkets.map((market) => [normalizedDeduplicationKey(market.conditionId, market.marketSlug, market.question), market]));
     const acceptedByDuration = { ...EMPTY_ACCEPTED_BY_DURATION };
     const rejectedByReason = { ...EMPTY_REJECTED_BY_REASON };
     for (const market of discoveryResult.acceptedMarkets) acceptedByDuration[market.marketDuration] += 1;
-    for (const market of discoveryResult.rejectedMarkets) rejectedByReason[market.rejectionReason] = (rejectedByReason[market.rejectionReason] ?? 0) + 1;
+    for (const market of auditRejectedMarkets) rejectedByReason[market.rejectionReason] = (rejectedByReason[market.rejectionReason] ?? 0) + 1;
     const queries = this.lastDiscoveryDebug.queries.map((query) => {
       let acceptedMarketsFromThisQuery = 0;
       let rejectedMarketsFromThisQuery = 0;
@@ -195,7 +213,7 @@ export class PolymarketGammaApiAdapter {
       });
       return { ...query, acceptedMarketsFromThisQuery, rejectedMarketsFromThisQuery, extractedCandidates };
     });
-    this.lastDiscoveryDebug = { ...this.lastDiscoveryDebug, acceptedMarkets: discoveryResult.acceptedMarkets.length, rejectedMarkets: discoveryResult.rejectedMarkets.length, acceptedByDuration, rejectedByReason, outsideRequestedDateRange: rejectedByReason['outside_requested_date_range'] ?? 0, hydrationAttempted: queries.flatMap((query) => query.extractedCandidates).filter((candidate) => candidate.hydrationAttempted === true).length, hydrationSucceeded: queries.flatMap((query) => query.extractedCandidates).filter((candidate) => candidate.hydrationSucceeded === true).length, targetPriceMissingAfterHydration: rejectedByReason['target_price_missing'] ?? 0, queries };
+    this.lastDiscoveryDebug = { ...this.lastDiscoveryDebug, acceptedMarkets: discoveryResult.acceptedMarkets.length, rejectedMarkets: auditRejectedMarkets.length, acceptedByDuration, rejectedByReason, outsideRequestedDateRange: rejectedByReason['outside_requested_date_range'] ?? 0, hydrationAttempted: queries.flatMap((query) => query.extractedCandidates).filter((candidate) => candidate.hydrationAttempted === true).length, hydrationSucceeded: queries.flatMap((query) => query.extractedCandidates).filter((candidate) => candidate.hydrationSucceeded === true).length, targetPriceMissingAfterHydration: rejectedByReason['target_price_missing'] ?? 0, queries };
     return this.lastDiscoveryDebug;
   }
 
@@ -262,7 +280,9 @@ export class PolymarketGammaApiAdapter {
       else return false;
       return true;
     };
-    const exactTitleTerms = buildExactBitcoinUpDownTitleSearchTerms(startDate, endDate, requestedMarketDuration);
+    const exactTitleTermGroups = buildExactBitcoinUpDownTitleSearchTermGroups(startDate, endDate, requestedMarketDuration);
+    const exactTitleTermsByDuration = new Map(exactTitleTermGroups.flatMap((group) => group.terms.map((term) => [term, group.duration] as const)));
+    const exactTitleTerms = exactTitleTermGroups.flatMap((group) => group.terms);
     const genericTerms = durationSpecificBitcoinUpDownSearchTerms(requestedMarketDuration, expandedSearch);
     for (const { searchTerm, maxPagesPerQuery } of [...exactTitleTerms.map((searchTerm) => ({ searchTerm, maxPagesPerQuery: 1 })), ...genericTerms.map((searchTerm) => ({ searchTerm, maxPagesPerQuery: limits.discoveryMaxPagesPerQuery }))]) {
       const sources: readonly GammaDiscoverySource[] = ['public-search', 'events', 'series', 'markets'];
@@ -314,7 +334,7 @@ export class PolymarketGammaApiAdapter {
       rawMarketsFetched,
       earliestFetchedEndDate: earliestFetchedEndTimestamp === null ? null : new Date(earliestFetchedEndTimestamp).toISOString(),
       latestFetchedEndDate: latestFetchedEndTimestamp === null ? null : new Date(latestFetchedEndTimestamp).toISOString(),
-      debug: { startDate, endDate, requestedMarketDuration, rawResponsesFetched, candidateMarketsFetched: rawMarketsFetched, deduplicatedCandidateMarkets: deduplicatedCandidates.size, locallyMatchedMarkets: [...deduplicatedCandidates.values()].filter(isBitcoinUpDownMarket).length, acceptedMarkets: 0, rejectedMarkets: 0, acceptedByDuration: { ...EMPTY_ACCEPTED_BY_DURATION }, rejectedByReason: { ...EMPTY_REJECTED_BY_REASON }, outsideRequestedDateRange: 0, hydrationAttempted: 0, hydrationSucceeded: 0, targetPriceMissingAfterHydration: 0, stopReason, searchedExactTitleTermsCount: new Set(queries.filter((query) => exactTitleTerms.includes(query.queryTerm)).map((query) => query.queryTerm)).size, searchedGenericTermsCount: new Set(queries.filter((query) => genericTerms.includes(query.queryTerm)).map((query) => query.queryTerm)).size, queries },
+      debug: { startDate, endDate, requestedMarketDuration, rawResponsesFetched, candidateMarketsFetched: rawMarketsFetched, deduplicatedCandidateMarkets: deduplicatedCandidates.size, locallyMatchedMarkets: [...deduplicatedCandidates.values()].filter(isBitcoinUpDownMarket).length, acceptedMarkets: 0, rejectedMarkets: 0, acceptedByDuration: { ...EMPTY_ACCEPTED_BY_DURATION }, rejectedByReason: { ...EMPTY_REJECTED_BY_REASON }, outsideRequestedDateRange: 0, hydrationAttempted: 0, hydrationSucceeded: 0, targetPriceMissingAfterHydration: 0, stopReason, searchedExactTitleTermsCount: new Set(queries.filter((query) => exactTitleTerms.includes(query.queryTerm)).map((query) => query.queryTerm)).size, searchedExactTitleTermsByDuration: countSearchedExactTitleTermsByDuration(queries, exactTitleTermsByDuration), searchedGenericTermsCount: new Set(queries.filter((query) => genericTerms.includes(query.queryTerm)).map((query) => query.queryTerm)).size, queries },
     };
   }
 
