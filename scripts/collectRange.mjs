@@ -68,14 +68,29 @@ function nextDay(date) {
   return new Date(date.getTime() + MS_PER_DAY);
 }
 
-function runDailyCollector(date, marketDuration, force) {
-  const args = ['run', `collect:pm:${marketDuration}`, '--', '--date', date];
-  if (force) {
-    args.push('--force');
+function runNpm(args) {
+  if (process.platform === 'win32') {
+    return spawnSync('cmd.exe', ['/d', '/s', '/c', 'npm', ...args], {
+      stdio: 'inherit',
+    });
   }
 
-  const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  return spawnSync(npmCommand, args, { stdio: 'inherit' });
+  return spawnSync('npm', args, {
+    stdio: 'inherit',
+  });
+}
+
+function runDailyCollector(date, marketDuration, force) {
+  const result = runNpm([
+    'run',
+    `collect:pm:${marketDuration}`,
+    '--',
+    '--date',
+    date,
+    ...(force ? ['--force'] : []),
+  ]);
+
+  return result;
 }
 
 function main() {
