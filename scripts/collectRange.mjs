@@ -74,7 +74,8 @@ function runDailyCollector(date, marketDuration, force) {
     args.push('--force');
   }
 
-  return spawnSync('npm', args, { stdio: 'inherit' });
+  const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  return spawnSync(npmCommand, args, { stdio: 'inherit' });
 }
 
 function main() {
