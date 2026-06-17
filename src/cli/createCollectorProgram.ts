@@ -123,7 +123,7 @@ function addSharedOptions(command: Command): Command {
     .option('--write-debug-json <trueOrFalse>', 'Write large debug JSON mirrors for small sample runs only', 'false')
     .option('--allow-broad-gamma-date-scan <trueOrFalse>', 'Debug only: allow broad Gamma date scan fallback when query discovery returns zero candidates', 'false')
     .option('--allow-empty-market-set <trueOrFalse>', 'Debug only: continue all pipeline when discovery accepts zero markets', 'false')
-    .option('--discovery-timeout-seconds <seconds>', 'Maximum discovery runtime per command', '60')
+    .option('--discovery-timeout-seconds <seconds>', 'Maximum discovery runtime per command', '120')
     .option('--discovery-max-pages-per-query <count>', 'Maximum Gamma pages per discovery source/query', '6')
     .option('--discovery-max-total-requests <count>', 'Maximum total Gamma requests per discovery command', '300')
     .option('--discovery-max-candidates <count>', 'Maximum total candidate markets per discovery command', '2000')
@@ -152,7 +152,7 @@ async function runDoctorAction(dependencies: CollectorCliDependencies, logger: C
 }
 
 function parsePositiveIntegerOption(rawOptions: Record<string, unknown>, camelName: string, flagName: string): number {
-  const defaults: Record<string, string> = { discoveryTimeoutSeconds: '60', discoveryMaxPagesPerQuery: '6', discoveryMaxTotalRequests: '300', discoveryMaxCandidates: '2000' };
+  const defaults: Record<string, string> = { discoveryTimeoutSeconds: '120', discoveryMaxPagesPerQuery: '6', discoveryMaxTotalRequests: '300', discoveryMaxCandidates: '2000' };
   return parsePositiveIntegerValue(rawOptions[camelName] ?? defaults[camelName], flagName);
 }
 
