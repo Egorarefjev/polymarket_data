@@ -32,6 +32,20 @@ describe('discovery completeness audit', () => {
     expect(terms).toContain('Bitcoin Up or Down - May 1, 8PM-12AM ET');
   });
 
+  it('limits exact title terms to requested 4h duration', async () => {
+    const requestedQueries: string[] = [];
+    const adapter = new PolymarketGammaApiAdapter({
+      async getJson<T>(url: URL) {
+        requestedQueries.push(String(url.searchParams.get('q')));
+        return [] as T;
+      },
+    });
+    await adapter.discoverBitcoinUpDownMarkets('2026-05-02', '2026-05-03', { requestedMarketDuration: '4h', discoveryMaxTotalRequests: 200, discoveryMaxPagesPerQuery: 1 });
+    expect(requestedQueries).toContain('Bitcoin Up or Down - May 1, 4:00PM-8:00PM ET');
+    expect(requestedQueries).not.toContain('Bitcoin Up or Down - May 1, 8PM ET');
+    expect(adapter.getLastDiscoveryDebug()?.searchedExactTitleTermsByDuration).toEqual({ '1h': 0, '4h': 12, '1d': 0 });
+  });
+
   it('searches exact title terms before generic terms', async () => {
     const requestedQueries: string[] = [];
     const adapter = new PolymarketGammaApiAdapter({
@@ -41,8 +55,9 @@ describe('discovery completeness audit', () => {
       },
     });
     await adapter.discoverBitcoinUpDownMarkets('2026-05-02', '2026-05-03', { requestedMarketDuration: 'all', discoveryMaxTotalRequests: 200, discoveryMaxPagesPerQuery: 1 });
-    expect(requestedQueries[0]).toBe('Bitcoin Up or Down - May 1, 8PM ET');
-    expect(requestedQueries.indexOf('btc updown 1h')).toBeGreaterThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 4:00PM-8:00PM ET'));
+    expect(requestedQueries[0]).toBe('Bitcoin Up or Down - May 1, 4:00PM-8:00PM ET');
+    expect(requestedQueries.indexOf('Bitcoin Up or Down - May 1, 8PM ET')).toBeGreaterThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 12PM-4PM ET'));
+    expect(requestedQueries.indexOf('btc updown 1h')).toBeGreaterThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 7PM ET'));
   });
 
   it('accepted 1h market with endDate inside range is counted and audit contains inside summaries', () => {
