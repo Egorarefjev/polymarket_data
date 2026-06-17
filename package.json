@@ -15,7 +15,8 @@
     "collect:pm:all": "npm run collector -- all --market-duration all --write-debug-json false",
     "collect:pm:1h": "npm run collector -- all --market-duration 1h --write-debug-json false",
     "collect:pm:4h": "npm run collector -- all --market-duration 4h --write-debug-json false",
-    "collect:pm:1d": "npm run collector -- all --market-duration 1d --write-debug-json false"
+    "collect:pm:1d": "npm run collector -- all --market-duration 1d --write-debug-json false",
+    "collect:pm:range": "npm run collector -- range --market-duration all --write-debug-json false"
   },
   "dependencies": {
     "commander": "^14.0.2",
