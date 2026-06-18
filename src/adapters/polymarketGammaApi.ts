@@ -141,7 +141,7 @@ function buildExactBitcoinUpDownTitleSearchTermGroups(startDate: string, endDate
       groups['4h'].add(`Bitcoin Up or Down - ${startEt.monthDay}, ${startEt.hour}-${endEt.hour} ET`);
     }
   }
-  const durationOrder: MarketDuration[] = requestedDuration === 'all' ? ['4h', '1h', '1d'] : [requestedDuration];
+  const durationOrder: MarketDuration[] = requestedDuration === 'all' ? ['1h', '4h', '1d'] : [requestedDuration];
   return durationOrder.map((duration) => ({ duration, terms: [...groups[duration]] })).filter((group) => group.terms.length > 0);
 }
 
