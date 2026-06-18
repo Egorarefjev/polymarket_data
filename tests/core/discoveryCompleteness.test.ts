@@ -32,10 +32,11 @@ describe('discovery completeness audit', () => {
     expect(terms).toContain('Bitcoin Up or Down - May 1, 8PM-12AM ET');
   });
 
-  it('uses 1000 as the default discovery request budget', async () => {
+  it('uses 300 seconds and 2000 requests as the default discovery limits', async () => {
     const adapter = new PolymarketGammaApiAdapter({ async getJson<T>() { return [] as T; } });
     await adapter.discoverBitcoinUpDownMarkets('2026-05-02', '2026-05-03', { requestedMarketDuration: 'all', discoveryMaxPagesPerQuery: 1 });
-    expect(adapter.getLastDiscoveryDebug()?.discoveryMaxTotalRequests).toBe(1000);
+    expect(adapter.getLastDiscoveryDebug()?.discoveryTimeoutSeconds).toBe(300);
+    expect(adapter.getLastDiscoveryDebug()?.discoveryMaxTotalRequests).toBe(2000);
   });
 
   it('keeps exact title discovery interleaved across durations for all markets', async () => {
