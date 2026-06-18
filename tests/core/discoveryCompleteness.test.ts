@@ -32,6 +32,26 @@ describe('discovery completeness audit', () => {
     expect(terms).toContain('Bitcoin Up or Down - May 1, 8PM-12AM ET');
   });
 
+  it('uses 1000 as the default discovery request budget', async () => {
+    const adapter = new PolymarketGammaApiAdapter({ async getJson<T>() { return [] as T; } });
+    await adapter.discoverBitcoinUpDownMarkets('2026-05-02', '2026-05-03', { requestedMarketDuration: 'all', discoveryMaxPagesPerQuery: 1 });
+    expect(adapter.getLastDiscoveryDebug()?.discoveryMaxTotalRequests).toBe(1000);
+  });
+
+  it('keeps exact title discovery interleaved across durations for all markets', async () => {
+    const requestedQueries: string[] = [];
+    const adapter = new PolymarketGammaApiAdapter({
+      async getJson<T>(url: URL) {
+        requestedQueries.push(String(url.searchParams.get('q')));
+        return [] as T;
+      },
+    });
+    await adapter.discoverBitcoinUpDownMarkets('2026-05-02', '2026-05-03', { requestedMarketDuration: 'all', discoveryMaxTotalRequests: 8, discoveryMaxPagesPerQuery: 1 });
+    expect(requestedQueries).toContain('Bitcoin Up or Down - May 1, 8PM ET');
+    expect(requestedQueries).toContain('Bitcoin Up or Down - May 1, 4:00PM-8:00PM ET');
+    expect(adapter.getLastDiscoveryDebug()?.searchedExactTitleTermsByDuration).toEqual({ '1h': 1, '4h': 1, '1d': 0 });
+  });
+
   it('limits exact title terms to requested 4h duration', async () => {
     const requestedQueries: string[] = [];
     const adapter = new PolymarketGammaApiAdapter({
@@ -56,7 +76,7 @@ describe('discovery completeness audit', () => {
     });
     await adapter.discoverBitcoinUpDownMarkets('2026-05-02', '2026-05-03', { requestedMarketDuration: 'all', discoveryMaxTotalRequests: 200, discoveryMaxPagesPerQuery: 1 });
     expect(requestedQueries[0]).toBe('Bitcoin Up or Down - May 1, 8PM ET');
-    expect(requestedQueries.indexOf('Bitcoin Up or Down - May 1, 4:00PM-8:00PM ET')).toBeGreaterThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 7PM ET'));
+    expect(requestedQueries.indexOf('Bitcoin Up or Down - May 1, 4:00PM-8:00PM ET')).toBeLessThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 7PM ET'));
     expect(requestedQueries.indexOf('btc updown 1h')).toBeGreaterThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 7PM ET'));
   });
 
