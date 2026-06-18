@@ -40,6 +40,7 @@ export interface GammaDiscoveryDebug {
   endDate: string;
   requestedMarketDuration: RequestedMarketDuration;
   discoveryMaxTotalRequests: number;
+  discoveryTimeoutSeconds: number;
   rawResponsesFetched: number;
   candidateMarketsFetched: number;
   deduplicatedCandidateMarkets: number;
@@ -91,9 +92,9 @@ const EMPTY_REJECTED_BY_REASON: Record<string, number> = {
 };
 
 
-const DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 120;
+const DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 300;
 const DEFAULT_DISCOVERY_MAX_PAGES_PER_QUERY = 6;
-const DEFAULT_DISCOVERY_MAX_TOTAL_REQUESTS = 1000;
+const DEFAULT_DISCOVERY_MAX_TOTAL_REQUESTS = 2000;
 const DEFAULT_DISCOVERY_MAX_CANDIDATES = 2_000;
 const DEFAULT_DISCOVERY_REQUEST_TIMEOUT_SECONDS = 10;
 
@@ -262,7 +263,7 @@ export class PolymarketGammaApiAdapter {
     // eslint-disable-next-line no-console
     console.info(`Discovery stopped: reason=${this.lastDiscoveryDebug.stopReason}`);
     // eslint-disable-next-line no-console
-    console.info(JSON.stringify({ discoveryMaxTotalRequests: this.lastDiscoveryDebug.discoveryMaxTotalRequests, pagesFetched: discovery.pagesFetched, rawResponsesFetched: this.lastDiscoveryDebug.rawResponsesFetched, rawMarketsFetched: discovery.rawMarketsFetched, candidateMarketsFetched: discovery.rawMarketsFetched, deduplicatedCandidateMarkets: discovery.markets.length, locallyMatchedMarkets, matchingMarketsFound: locallyMatchedMarkets, acceptedByDuration: this.lastDiscoveryDebug.acceptedByDuration, rejectedByReason: this.lastDiscoveryDebug.rejectedByReason, stopReason: this.lastDiscoveryDebug.stopReason, earliestFetchedEndDate: discovery.earliestFetchedEndDate, latestFetchedEndDate: discovery.latestFetchedEndDate, searchedExactTitleTermsByDuration: this.lastDiscoveryDebug.searchedExactTitleTermsByDuration, searchedGenericTermsCount: this.lastDiscoveryDebug.searchedGenericTermsCount }));
+    console.info(JSON.stringify({ discoveryTimeoutSeconds: this.lastDiscoveryDebug.discoveryTimeoutSeconds, discoveryMaxTotalRequests: this.lastDiscoveryDebug.discoveryMaxTotalRequests, pagesFetched: discovery.pagesFetched, rawResponsesFetched: this.lastDiscoveryDebug.rawResponsesFetched, rawMarketsFetched: discovery.rawMarketsFetched, candidateMarketsFetched: discovery.rawMarketsFetched, deduplicatedCandidateMarkets: discovery.markets.length, locallyMatchedMarkets, matchingMarketsFound: locallyMatchedMarkets, acceptedByDuration: this.lastDiscoveryDebug.acceptedByDuration, rejectedByReason: this.lastDiscoveryDebug.rejectedByReason, stopReason: this.lastDiscoveryDebug.stopReason, earliestFetchedEndDate: discovery.earliestFetchedEndDate, latestFetchedEndDate: discovery.latestFetchedEndDate, searchedExactTitleTermsByDuration: this.lastDiscoveryDebug.searchedExactTitleTermsByDuration, searchedGenericTermsCount: this.lastDiscoveryDebug.searchedGenericTermsCount }));
     return discovery.markets;
   }
 
@@ -346,7 +347,7 @@ export class PolymarketGammaApiAdapter {
       rawMarketsFetched,
       earliestFetchedEndDate: earliestFetchedEndTimestamp === null ? null : new Date(earliestFetchedEndTimestamp).toISOString(),
       latestFetchedEndDate: latestFetchedEndTimestamp === null ? null : new Date(latestFetchedEndTimestamp).toISOString(),
-      debug: { startDate, endDate, requestedMarketDuration, discoveryMaxTotalRequests: limits.discoveryMaxTotalRequests, rawResponsesFetched, candidateMarketsFetched: rawMarketsFetched, deduplicatedCandidateMarkets: deduplicatedCandidates.size, locallyMatchedMarkets: [...deduplicatedCandidates.values()].filter(isBitcoinUpDownMarket).length, acceptedMarkets: 0, rejectedMarkets: 0, acceptedByDuration: { ...EMPTY_ACCEPTED_BY_DURATION }, rejectedByReason: { ...EMPTY_REJECTED_BY_REASON }, outsideRequestedDateRange: 0, hydrationAttempted: 0, hydrationSucceeded: 0, targetPriceMissingAfterHydration: 0, stopReason, searchedExactTitleTermsCount: new Set(queries.filter((query) => exactTitleTerms.includes(query.queryTerm)).map((query) => query.queryTerm)).size, searchedExactTitleTermsByDuration: countSearchedExactTitleTermsByDuration(queries, exactTitleTermsByDuration), searchedGenericTermsCount: new Set(queries.filter((query) => genericTerms.includes(query.queryTerm)).map((query) => query.queryTerm)).size, queries },
+      debug: { startDate, endDate, requestedMarketDuration, discoveryTimeoutSeconds: limits.discoveryTimeoutSeconds, discoveryMaxTotalRequests: limits.discoveryMaxTotalRequests, rawResponsesFetched, candidateMarketsFetched: rawMarketsFetched, deduplicatedCandidateMarkets: deduplicatedCandidates.size, locallyMatchedMarkets: [...deduplicatedCandidates.values()].filter(isBitcoinUpDownMarket).length, acceptedMarkets: 0, rejectedMarkets: 0, acceptedByDuration: { ...EMPTY_ACCEPTED_BY_DURATION }, rejectedByReason: { ...EMPTY_REJECTED_BY_REASON }, outsideRequestedDateRange: 0, hydrationAttempted: 0, hydrationSucceeded: 0, targetPriceMissingAfterHydration: 0, stopReason, searchedExactTitleTermsCount: new Set(queries.filter((query) => exactTitleTerms.includes(query.queryTerm)).map((query) => query.queryTerm)).size, searchedExactTitleTermsByDuration: countSearchedExactTitleTermsByDuration(queries, exactTitleTermsByDuration), searchedGenericTermsCount: new Set(queries.filter((query) => genericTerms.includes(query.queryTerm)).map((query) => query.queryTerm)).size, queries },
     };
   }
 

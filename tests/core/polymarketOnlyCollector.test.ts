@@ -28,10 +28,13 @@ describe('Polymarket-only collector regression', () => {
     expect(options).not.toHaveProperty('includeBinanceSecondarySignal');
   });
 
-  it('defaults discovery request budget to 1000 and accepts custom caps', () => {
+  it('defaults discovery timeout and request budget while accepting custom caps', () => {
     const baseOptions = { date: '2026-05-01', priceFidelityMinutes: '1', requestDelayMilliseconds: '0', maximumConcurrentRequests: '1', marketDuration: 'all' };
     const defaults = parseOptions(baseOptions);
-    expect(defaults.discoveryMaxTotalRequests).toBe(1000);
+    expect(defaults.discoveryTimeoutSeconds).toBe(300);
+    expect(defaults.discoveryMaxTotalRequests).toBe(2000);
+    expect(parseOptions({ ...baseOptions, discoveryTimeoutSeconds: '120' }).discoveryTimeoutSeconds).toBe(120);
+    expect(parseOptions({ ...baseOptions, discoveryTimeoutSeconds: '600' }).discoveryTimeoutSeconds).toBe(600);
     expect(parseOptions({ ...baseOptions, discoveryMaxTotalRequests: '300' }).discoveryMaxTotalRequests).toBe(300);
     expect(parseOptions({ ...baseOptions, discoveryMaxTotalRequests: '1000' }).discoveryMaxTotalRequests).toBe(1000);
     expect(parseOptions({ ...baseOptions, discoveryMaxTotalRequests: '2000' }).discoveryMaxTotalRequests).toBe(2000);
