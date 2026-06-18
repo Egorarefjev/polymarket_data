@@ -131,8 +131,8 @@ function buildExactBitcoinUpDownTitleSearchTermGroups(startDate: string, endDate
   const groups: Record<MarketDuration, Set<string>> = { '1h': new Set<string>(), '4h': new Set<string>(), '1d': new Set<string>() };
   if (requestedDuration === 'all' || requestedDuration === '1h') {
     for (let endTimestamp = start; endTimestamp < end; endTimestamp += 60 * 60_000) {
-      const endEt = formatEtMarketTime(endTimestamp);
-      groups['1h'].add(`Bitcoin Up or Down - ${endEt.monthDay}, ${endEt.hour} ET`);
+      const titleEt = formatEtMarketTime(endTimestamp - 60 * 60_000);
+      groups['1h'].add(`Bitcoin Up or Down - ${titleEt.monthDay}, ${titleEt.hour} ET`);
     }
   }
   if (requestedDuration === 'all' || requestedDuration === '4h') {

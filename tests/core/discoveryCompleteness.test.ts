@@ -17,12 +17,20 @@ const baseMarket = {
 };
 
 describe('discovery completeness audit', () => {
-  it('date range 2026-05-02 UTC generates relevant ET hourly search windows', () => {
+  it('date range 2026-05-02 UTC generates hourly search titles from candle start times', () => {
     const terms = buildExactBitcoinUpDownTitleSearchTerms('2026-05-02', '2026-05-03', 'all');
+    expect(terms).toContain('Bitcoin Up or Down - May 1, 7PM ET');
     expect(terms).toContain('Bitcoin Up or Down - May 1, 8PM ET');
-    expect(terms).toContain('Bitcoin Up or Down - May 1, 9PM ET');
     expect(terms).toContain('Bitcoin Up or Down - May 2, 12AM ET');
+    expect(terms).toContain('Bitcoin Up or Down - May 2, 6PM ET');
+    expect(terms).not.toContain('Bitcoin Up or Down - May 2, 7PM ET');
+  });
+
+  it('date range 2026-05-03 UTC generates hourly search titles from candle start times', () => {
+    const terms = buildExactBitcoinUpDownTitleSearchTerms('2026-05-03', '2026-05-04', '1h');
     expect(terms).toContain('Bitcoin Up or Down - May 2, 7PM ET');
+    expect(terms).toContain('Bitcoin Up or Down - May 3, 6PM ET');
+    expect(terms).not.toContain('Bitcoin Up or Down - May 3, 7PM ET');
   });
 
   it('date range 2026-05-02 UTC generates relevant ET 4h search windows', () => {
@@ -48,7 +56,7 @@ describe('discovery completeness audit', () => {
       },
     });
     await adapter.discoverBitcoinUpDownMarkets('2026-05-02', '2026-05-03', { requestedMarketDuration: 'all', discoveryMaxTotalRequests: 8, discoveryMaxPagesPerQuery: 1 });
-    expect(requestedQueries).toContain('Bitcoin Up or Down - May 1, 8PM ET');
+    expect(requestedQueries).toContain('Bitcoin Up or Down - May 1, 7PM ET');
     expect(requestedQueries).toContain('Bitcoin Up or Down - May 1, 4:00PM-8:00PM ET');
     expect(adapter.getLastDiscoveryDebug()?.searchedExactTitleTermsByDuration).toEqual({ '1h': 1, '4h': 1, '1d': 0 });
   });
@@ -76,9 +84,9 @@ describe('discovery completeness audit', () => {
       },
     });
     await adapter.discoverBitcoinUpDownMarkets('2026-05-02', '2026-05-03', { requestedMarketDuration: 'all', discoveryMaxTotalRequests: 200, discoveryMaxPagesPerQuery: 1 });
-    expect(requestedQueries[0]).toBe('Bitcoin Up or Down - May 1, 8PM ET');
-    expect(requestedQueries.indexOf('Bitcoin Up or Down - May 1, 4:00PM-8:00PM ET')).toBeLessThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 7PM ET'));
-    expect(requestedQueries.indexOf('btc updown 1h')).toBeGreaterThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 7PM ET'));
+    expect(requestedQueries[0]).toBe('Bitcoin Up or Down - May 1, 7PM ET');
+    expect(requestedQueries.indexOf('Bitcoin Up or Down - May 1, 4:00PM-8:00PM ET')).toBeLessThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 6PM ET'));
+    expect(requestedQueries.indexOf('btc updown 1h')).toBeGreaterThan(requestedQueries.lastIndexOf('Bitcoin Up or Down - May 2, 6PM ET'));
   });
 
   it('accepted 1h market with endDate inside range is counted and audit contains inside summaries', () => {
